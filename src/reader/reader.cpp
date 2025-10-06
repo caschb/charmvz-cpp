@@ -67,6 +67,6 @@ StsData read_sts_file(const std::string_view sts_file_path) {
     }
   }
   sts_file.close();
-
+  spdlog::debug("Read {} chares, {} entries, {} messages", chares.size(), entries.size(), messages.size());
   return StsData{chares, entries, messages};
 }
