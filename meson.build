@@ -6,13 +6,13 @@ deps = []
 deps += dependency('spdlog', version: '>=1.15.3')
 
 # add CLI11 as a dependency
-deps += dependency('cli11', version: '>=2.5.0')
+deps += dependency('CLI11', version: '>=2.5.0')
 
 # add Catch2 as a dependency
 test_deps = deps + dependency(
 'Catch2',
  method:'cmake',
- version: '>=3.11.0',
+ version: '>=3.10.0',
  modules: ['Catch2::Catch2WithMain'],
  required: false)
 
