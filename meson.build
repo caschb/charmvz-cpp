@@ -3,10 +3,20 @@ project('CharmVZ', 'cpp',
        )
 deps = []
 # add spdlog as a dependency
-deps += dependency('spdlog', version: '>=1.15.3')
+deps += dependency('spdlog', version: '>=1.15.3', required: true)
 
 # add CLI11 as a dependency
-deps += dependency('CLI11', version: '>=2.5.0')
+deps += dependency('CLI11', version: '>=2.5.0', required: true)
+
+# add zlib as a dependency
+z_dep = dependency('zlib', required : true)
+deps += z_dep
+
+# add zstr as a CMake-based subproject
+cmake = import('cmake')
+zstr_sub = cmake.subproject('zstr')
+deps += zstr_sub.dependency('zstr')
+
 
 # add Catch2 as a dependency
 test_deps = deps + dependency(
