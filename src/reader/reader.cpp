@@ -1,8 +1,8 @@
 #include "reader.h"
-#include <string_view>
+#include "spdlog/spdlog.h"
 #include <fstream>
 #include <sstream>
-#include "spdlog/spdlog.h"
+#include <string_view>
 #include <vector>
 #include <zstr.hpp>
 
@@ -17,7 +17,8 @@ Chare parse_chare_line(const std::string_view line) {
   return Chare{chare_name.substr(1, chare_name.length() - 2), ndims, idx};
 }
 
-// Example ENTRY line: ENTRY CHARE 80 "inmem_checkpoint(CkArrayCheckPTReqMessage* impl_msg)" 28 0
+// Example ENTRY line: ENTRY CHARE 80
+// "inmem_checkpoint(CkArrayCheckPTReqMessage* impl_msg)" 28 0
 Entry parse_entry_line(const std::string_view line) {
   std::istringstream line_stream{std::string{line}};
   std::string token;
@@ -57,22 +58,22 @@ StsData read_sts_file(const std::string_view sts_file_path) {
     if (token == "CHARE") {
       Chare chare = parse_chare_line(line);
       chares.push_back(chare);
-    } 
-    else if (token == "ENTRY") {
+    } else if (token == "ENTRY") {
       Entry entry = parse_entry_line(line);
       entries.push_back(entry);
-    }
-    else if (token == "MESSAGE") {
+    } else if (token == "MESSAGE") {
       Message message = parse_message_line(line);
       messages.push_back(message);
     }
   }
   sts_file.close();
-  spdlog::debug("Read {} chares, {} entries, {} messages", chares.size(), entries.size(), messages.size());
+  spdlog::debug("Read {} chares, {} entries, {} messages", chares.size(),
+                entries.size(), messages.size());
   return StsData{chares, entries, messages};
 }
 
-std::vector<LogEntry> read_log_files(const std::vector<std::string> &log_file_paths) {
+std::vector<LogEntry>
+read_log_files(const std::vector<std::string> &log_file_paths) {
   spdlog::debug("Reading {} log files", log_file_paths.size());
   std::vector<LogEntry> log_entries;
   for (const auto &log_file_path : log_file_paths) {
@@ -91,12 +92,15 @@ std::vector<LogEntry> read_log_files(const std::vector<std::string> &log_file_pa
       if (token == static_cast<int>(LogType::CREATION)) {
         LogEntry entry;
         entry.type = LogType::CREATION;
-        line_stream >> entry.msg_id >> entry.event_id >> entry.timestamp >> 
-        entry.event >> entry.processing_element >> entry.message_len >> 
-        entry.recvtime;
-        spdlog::trace("Log Entry - Type: {}, Msg ID: {}, Event ID: {}, Timestamp: {}, Event: {}, PE: {}, Msg Len: {}, Recv Time: {}",
-                      static_cast<int>(entry.type), entry.msg_id, entry.event_id, entry.timestamp,
-                      entry.event, entry.processing_element, entry.message_len, entry.recvtime);
+        line_stream >> entry.msg_id >> entry.event_id >> entry.timestamp >>
+            entry.event >> entry.processing_element >> entry.message_len >>
+            entry.recvtime;
+        spdlog::trace(
+            "Log Entry - Type: {}, Msg ID: {}, Event ID: {}, Timestamp: {}, "
+            "Event: {}, PE: {}, Msg Len: {}, Recv Time: {}",
+            static_cast<int>(entry.type), entry.msg_id, entry.event_id,
+            entry.timestamp, entry.event, entry.processing_element,
+            entry.message_len, entry.recvtime);
         log_entries.push_back(entry);
       } else if (token == static_cast<int>(LogType::BEGIN_PROCESSING)) {
         // Handle BEGIN_PROCESSING log

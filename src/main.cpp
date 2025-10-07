@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
   CLI11_PARSE(app, argc, argv);
 
   std::string sts_file_path;
-  std::vector<std::string> traces_paths;  
+  std::vector<std::string> traces_paths;
   for (auto const &entry : std::filesystem::directory_iterator{logs_path}) {
     std::string extension{entry.path().extension()};
     if (extension == ".sts") {

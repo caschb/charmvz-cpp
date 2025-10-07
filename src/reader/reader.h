@@ -1,8 +1,8 @@
 #ifndef READER_H
 #define READER_H
 #include <cstdint>
-#include <string_view>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct Chare {
@@ -29,7 +29,7 @@ struct StsData {
   std::vector<Message> messages;
 };
 
-enum class LogType { 
+enum class LogType {
   CREATION = 1,
   BEGIN_PROCESSING = 2,
   END_PROCESSING = 3,
@@ -45,9 +45,9 @@ enum class LogType {
   CREATION_BCAST = 20,
   END_PHASE = 30,
   USER_EVENT_PAIR = 100,
- };
+};
 
- struct LogEntry {
+struct LogEntry {
   LogType type;
   int64_t msg_id;
   int64_t event_id;
@@ -56,12 +56,13 @@ enum class LogType {
   int64_t processing_element;
   int64_t message_len;
   int64_t recvtime;
-  int64_t user_event_id; // For USER_EVENT and USER_EVENT_PAIR
+  int64_t user_event_id;    // For USER_EVENT and USER_EVENT_PAIR
   int64_t user_event_value; // For USER_EVENT_PAIR
- };
+};
 
 StsData read_sts_file(std::string_view sts_file_path);
 
-std::vector<LogEntry> read_log_files(const std::vector<std::string> &log_file_paths);
+std::vector<LogEntry>
+read_log_files(const std::vector<std::string> &log_file_paths);
 
 #endif
