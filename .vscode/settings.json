@@ -1,4 +1,5 @@
 {
-    "C_Cpp.default.compileCommands": "/Users/casch/Devel/charmvz-c/build/compile_commands.json",
-    "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild"
+    "C_Cpp.default.compileCommands": "${workspaceFolderBasename}/charmvz-c/build/compile_commands.json",
+    "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
+    "cmake.ignoreCMakeListsMissing": true
 }
