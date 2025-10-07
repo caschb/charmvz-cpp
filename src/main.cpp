@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <string>
 #include <vector>
-#include <zstr.hpp>
 
 int main(int argc, char **argv) {
   spdlog::cfg::load_env_levels();

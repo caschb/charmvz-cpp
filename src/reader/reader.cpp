@@ -1,10 +1,10 @@
 #include "reader.h"
 #include "spdlog/spdlog.h"
+#include "zstr.hpp"
 #include <fstream>
 #include <sstream>
 #include <string_view>
 #include <vector>
-#include <zstr.hpp>
 
 // Example CHARE line: CHARE 11 "CkReductionMgr" -1
 Chare parse_chare_line(const std::string_view line) {
