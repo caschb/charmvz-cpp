@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <zstr.hpp>
 
 int main(int argc, char **argv) {
   spdlog::cfg::load_env_levels();
@@ -12,7 +13,7 @@ int main(int argc, char **argv) {
 
   // std::filesystem::path logs_path;
   std::filesystem::path logs_path;
-  app.add_option("-s,--sts", logs_path, "STS File Path")
+  app.add_option("-l,--logs", logs_path, "Logs Directory Path")
       ->required()
       ->check(CLI::ExistingDirectory);
   CLI11_PARSE(app, argc, argv);
@@ -28,9 +29,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  spdlog::debug("Total logs: {}", traces_paths.size());  
+  spdlog::debug("Total logs: {}", traces_paths.size());
 
-  read_sts_file(sts_file_path);
+  auto sts_data = read_sts_file(sts_file_path);
+  read_log_files(traces_paths);
 
   return 0;
 }
