@@ -74,13 +74,14 @@ StsData read_sts_file(const std::string_view sts_file_path) {
   return StsData{chares, entries, messages};
 }
 
-std::vector<LogEntry>
+std::vector<Timeline>
 read_log_files(const std::vector<std::string> &log_file_paths) {
   spdlog::debug("Reading {} log files", log_file_paths.size());
-  std::vector<LogEntry> log_entries;
+  std::vector<Timeline> timelines;
   for (const auto &log_file_path : log_file_paths) {
     spdlog::debug("Reading log file: {}", log_file_path);
     auto timeline = create_timeline(log_file_path);
+    timelines.push_back(timeline);
   }
-  return log_entries;
+  return timelines;
 }
