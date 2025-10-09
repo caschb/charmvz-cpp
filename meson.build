@@ -31,6 +31,9 @@ test_deps = deps + dependency(
 files = [
   'src/main.cpp',
   'src/reader/reader.cpp',
+  'src/utils/log_entry.cpp',
+  'src/utils/log_reader.cpp',
+  'src/utils/timeline.cpp',
 ]
 
 executable('charmvz', files, dependencies: deps)
@@ -38,6 +41,10 @@ executable('charmvz', files, dependencies: deps)
 # add tests
 test_files = [
   'tests/test_reader.cpp',
+  'src/reader/reader.cpp',
+  'src/utils/log_entry.cpp',
+  'src/utils/log_reader.cpp',
+  'src/utils/timeline.cpp',
 ]
 
 test(

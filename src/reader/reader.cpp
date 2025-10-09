@@ -1,6 +1,8 @@
 #include "reader.h"
 #include "spdlog/spdlog.h"
-#include "zstr.hpp"
+#include "src/utils/log_entry.h"
+#include "src/utils/log_reader.h"
+#include "src/utils/timeline.h"
 #include <fstream>
 #include <sstream>
 #include <string_view>
@@ -77,62 +79,8 @@ read_log_files(const std::vector<std::string> &log_file_paths) {
   spdlog::debug("Reading {} log files", log_file_paths.size());
   std::vector<LogEntry> log_entries;
   for (const auto &log_file_path : log_file_paths) {
-    spdlog::debug("Reading {}", log_file_path);
-    zstr::ifstream log_file{log_file_path.c_str()};
-    if (!log_file) {
-      spdlog::error("Failed to open log file: {}", log_file_path);
-      continue;
-    }
-    std::string line;
-    while (std::getline(log_file, line)) {
-      // Process each line of the log file
-      std::istringstream line_stream{line};
-      int token;
-      line_stream >> token;
-      if (token == static_cast<int>(LogType::CREATION)) {
-        LogEntry entry;
-        entry.type = LogType::CREATION;
-        line_stream >> entry.msg_id >> entry.event_id >> entry.timestamp >>
-            entry.event >> entry.processing_element >> entry.message_len >>
-            entry.recvtime;
-        spdlog::trace(
-            "Log Entry - Type: {}, Msg ID: {}, Event ID: {}, Timestamp: {}, "
-            "Event: {}, PE: {}, Msg Len: {}, Recv Time: {}",
-            static_cast<int>(entry.type), entry.msg_id, entry.event_id,
-            entry.timestamp, entry.event, entry.processing_element,
-            entry.message_len, entry.recvtime);
-        log_entries.push_back(entry);
-      } else if (token == static_cast<int>(LogType::BEGIN_PROCESSING)) {
-        // Handle BEGIN_PROCESSING log
-      } else if (token == static_cast<int>(LogType::END_PROCESSING)) {
-        // Handle END_PROCESSING log
-      } else if (token == static_cast<int>(LogType::BEGIN_COMPUTATION)) {
-        // Handle BEGIN_COMPUTATION log
-      } else if (token == static_cast<int>(LogType::END_COMPUTATION)) {
-        // Handle END_COMPUTATION log
-      } else if (token == static_cast<int>(LogType::USER_EVENT)) {
-        // Handle USER_EVENT log
-      } else if (token == static_cast<int>(LogType::BEGIN_IDLE)) {
-        // Handle BEGIN_IDLE log
-      } else if (token == static_cast<int>(LogType::END_IDLE)) {
-        // Handle END_IDLE log
-      } else if (token == static_cast<int>(LogType::BEGIN_PACK)) {
-        // Handle BEGIN_PACK log
-      } else if (token == static_cast<int>(LogType::END_PACK)) {
-        // Handle END_PACK log
-      } else if (token == static_cast<int>(LogType::BEGIN_UNPACK)) {
-        // Handle BEGIN_UNPACK log
-      } else if (token == static_cast<int>(LogType::END_UNPACK)) {
-        // Handle END_UNPACK log
-      } else if (token == static_cast<int>(LogType::CREATION_BCAST)) {
-        // Handle CREATION_BCAST log
-      } else if (token == static_cast<int>(LogType::END_PHASE)) {
-        // Handle END_PHASE log
-      } else if (token == static_cast<int>(LogType::USER_EVENT_PAIR)) {
-        // Handle USER_EVENT_PAIR log
-      }
-    }
-    log_file.close();
+    spdlog::debug("Reading log file: {}", log_file_path);
+    auto timeline = create_timeline(log_file_path);
   }
   return log_entries;
 }
