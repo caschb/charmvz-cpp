@@ -1,7 +1,6 @@
 #ifndef READER_H
 #define READER_H
 #include "src/utils/log_entry.h"
-#include "src/utils/timeline.h"
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -35,6 +34,5 @@ StsData read_sts_file(const std::string_view sts_file_path);
 
 std::vector<LogEntry>
 read_log_files(const std::vector<std::string> &log_file_paths);
-
 
 #endif
