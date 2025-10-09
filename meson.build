@@ -19,6 +19,10 @@ cmake = import('cmake')
 zstr_sub = cmake.subproject('zstr')
 deps += zstr_sub.dependency('zstr')
 
+# add arrow as a dependency
+arrow_dep = dependency('arrow', version: '>=11.0.0', required: true)
+deps += arrow_dep
+
 # add Catch2 as a dependency
 test_deps = deps + dependency(
   'Catch2',
