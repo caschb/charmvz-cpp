@@ -1,6 +1,5 @@
 #ifndef READER_H
 #define READER_H
-#include "src/utils/log_entry.h"
 #include "src/utils/timeline.h"
 #include <cstdint>
 #include <string>

@@ -1,7 +1,5 @@
 #include "reader.h"
 #include "spdlog/spdlog.h"
-#include "src/utils/log_entry.h"
-#include "src/utils/log_reader.h"
 #include "src/utils/timeline.h"
 #include <fstream>
 #include <sstream>
