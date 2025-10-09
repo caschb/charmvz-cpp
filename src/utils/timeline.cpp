@@ -257,11 +257,19 @@ Timeline create_timeline(const std::string_view log_file_path,
         break;
       }
 
+      case LogType::USER_EVENT_PAIR: {
+        spdlog::trace("USER_EVENT_PAIR: entry={}, pe={}, time={}",
+                      log_entry.entry, log_entry.pe, log_entry.timestamp);
+        break;
+      }
+
       case LogType::UNKNOWN:
-      default: {
-        spdlog::warn("Unknown or unhandled log entry type: {}",
+        spdlog::warn("Unknown log entry type: {}",
                      static_cast<int>(log_entry.type));
         break;
+      default: {
+        spdlog::trace("Other log entry type: {}",
+                      static_cast<int>(log_entry.type));
       }
       }
     }
