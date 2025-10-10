@@ -4,7 +4,6 @@
 #include "arrow/type_fwd.h"
 #include <arrow/api.h>
 #include <arrow/io/api.h>
-#include <filesystem>
 #include <memory>
 #include <parquet/arrow/writer.h>
 #include <spdlog/spdlog.h>
