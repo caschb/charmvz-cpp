@@ -2,6 +2,7 @@
 #include "reader/reader.h"
 #include "spdlog/cfg/env.h"
 #include "spdlog/spdlog.h"
+#include "writer/writer.h"
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -31,7 +32,6 @@ int main(int argc, char **argv) {
   spdlog::debug("Total logs: {}", traces_paths.size());
 
   auto sts_data = read_sts_file(sts_file_path);
-  read_log_files(traces_paths);
-
-  return 0;
+  auto timelines = read_log_files(traces_paths);
+  write_timeline(timelines[0]);
 }

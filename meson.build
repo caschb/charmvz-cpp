@@ -19,9 +19,10 @@ cmake = import('cmake')
 zstr_sub = cmake.subproject('zstr')
 deps += zstr_sub.dependency('zstr')
 
-# add arrow as a dependency
-arrow_dep = dependency('arrow', version: '>=11.0.0', required: true)
-deps += arrow_dep
+# add Apache Arrow for parquet support
+arrow_dep = dependency('arrow', required: true)
+parquet_dep = dependency('parquet', required: true)
+deps += [arrow_dep, parquet_dep]
 
 # add Catch2 as a dependency
 test_deps = deps + dependency(
@@ -35,6 +36,7 @@ test_deps = deps + dependency(
 files = [
   'src/main.cpp',
   'src/reader/reader.cpp',
+  'src/writer/writer.cpp',
   'src/utils/log_entry.cpp',
   'src/utils/log_reader.cpp',
   'src/utils/timeline.cpp',

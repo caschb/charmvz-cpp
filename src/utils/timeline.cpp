@@ -64,6 +64,19 @@ Timeline create_timeline(const std::string_view log_file_path,
                     log_entry.timestamp, log_entry.pe);
 
       switch (log_entry.type) {
+
+      case LogType::BEGIN_COMPUTATION: {
+        spdlog::trace("BEGIN_COMPUTATION: entry={}, pe={}, time={}",
+                      log_entry.entry, log_entry.pe, log_entry.timestamp);
+        break;
+      }
+
+      case LogType::END_COMPUTATION: {
+        spdlog::trace("END_COMPUTATION: entry={}, pe={}, time={}",
+                      log_entry.entry, log_entry.pe, log_entry.timestamp);
+        break;
+      }
+
       case LogType::BEGIN_PROCESSING: {
         spdlog::trace("BEGIN_PROCESSING: entry={}, pe={}, time={}",
                       log_entry.entry, log_entry.pe, log_entry.timestamp);
@@ -232,6 +245,18 @@ Timeline create_timeline(const std::string_view log_file_path,
         break;
       }
 
+      case LogType::BEGIN_UNPACK: {
+        spdlog::trace("BEGIN_UNPACK: pe={}, time={}", log_entry.pe,
+                      log_entry.timestamp);
+        break;
+      }
+
+      case LogType::END_UNPACK: {
+        spdlog::trace("END_UNPACK: pe={}, time={}", log_entry.pe,
+                      log_entry.timestamp);
+        break;
+      }
+
       case LogType::CREATION: {
         spdlog::trace("CREATION: entry={}, pe={}, time={}, msglen={}",
                       log_entry.entry, log_entry.pe, log_entry.timestamp,
@@ -257,6 +282,12 @@ Timeline create_timeline(const std::string_view log_file_path,
         break;
       }
 
+      case LogType::END_PHASE: {
+        spdlog::trace("END_PHASE: pe={}, time={}", log_entry.pe,
+                      log_entry.timestamp);
+        break;
+      }
+
       case LogType::USER_EVENT_PAIR: {
         spdlog::trace("USER_EVENT_PAIR: entry={}, pe={}, time={}",
                       log_entry.entry, log_entry.pe, log_entry.timestamp);
@@ -264,12 +295,10 @@ Timeline create_timeline(const std::string_view log_file_path,
       }
 
       case LogType::UNKNOWN:
-        spdlog::warn("Unknown log entry type: {}",
+      default: {
+        spdlog::warn("Unknown or unhandled log entry type: {}",
                      static_cast<int>(log_entry.type));
         break;
-      default: {
-        spdlog::trace("Other log entry type: {}",
-                      static_cast<int>(log_entry.type));
       }
       }
     }
