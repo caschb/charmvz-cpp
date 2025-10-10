@@ -11,7 +11,6 @@ int main(int argc, char **argv) {
   spdlog::cfg::load_env_levels();
   CLI::App app{"Parser for Charm++ files"};
 
-  // std::filesystem::path logs_path;
   std::filesystem::path logs_path;
   app.add_option("-l,--logs", logs_path, "Logs Directory Path")
       ->required()
