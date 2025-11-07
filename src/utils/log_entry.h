@@ -17,22 +17,22 @@ constexpr int64_t IDLE_ENTRY = -1;
  * @brief Enumeration of Charm++ log entry types
  */
 enum class LogType {
-  UNKNOWN = -1,              ///< Unknown or unrecognized log type
-  CREATION = 1,              ///< Object creation event
-  BEGIN_PROCESSING = 2,      ///< Start of message processing
-  END_PROCESSING = 3,        ///< End of message processing
-  BEGIN_COMPUTATION = 6,     ///< Start of computation
-  END_COMPUTATION = 7,       ///< End of computation
-  USER_EVENT = 13,           ///< User-defined event
-  BEGIN_IDLE = 14,           ///< Start of idle time
-  END_IDLE = 15,             ///< End of idle time
-  BEGIN_PACK = 16,           ///< Start of message packing
-  END_PACK = 17,             ///< End of message packing
-  BEGIN_UNPACK = 18,         ///< Start of message unpacking
-  END_UNPACK = 19,           ///< End of message unpacking
-  CREATION_BCAST = 20,       ///< Broadcast creation event
-  END_PHASE = 30,            ///< End of a computation phase
-  USER_EVENT_PAIR = 100,     ///< Paired user-defined event
+  UNKNOWN = -1,          ///< Unknown or unrecognized log type
+  CREATION = 1,          ///< Object creation event
+  BEGIN_PROCESSING = 2,  ///< Start of message processing
+  END_PROCESSING = 3,    ///< End of message processing
+  BEGIN_COMPUTATION = 6, ///< Start of computation
+  END_COMPUTATION = 7,   ///< End of computation
+  USER_EVENT = 13,       ///< User-defined event
+  BEGIN_IDLE = 14,       ///< Start of idle time
+  END_IDLE = 15,         ///< End of idle time
+  BEGIN_PACK = 16,       ///< Start of message packing
+  END_PACK = 17,         ///< End of message packing
+  BEGIN_UNPACK = 18,     ///< Start of message unpacking
+  END_UNPACK = 19,       ///< End of message unpacking
+  CREATION_BCAST = 20,   ///< Broadcast creation event
+  END_PHASE = 30,        ///< End of a computation phase
+  USER_EVENT_PAIR = 100, ///< Paired user-defined event
 };
 
 /**
@@ -40,13 +40,13 @@ enum class LogType {
  * @brief Represents a single entry from a Charm++ log file
  */
 struct LogEntry {
-  LogType type;         ///< Type of log entry
-  int64_t mtype;        ///< Message type ID
-  int64_t timestamp;    ///< Timestamp of the event
-  int64_t entry;        ///< Entry method ID
-  int64_t event;        ///< Event ID
-  int64_t pe;           ///< Processing element (PE) ID
-  bool open;            ///< Whether this is an opening event
+  LogType type;      ///< Type of log entry
+  int64_t mtype;     ///< Message type ID
+  int64_t timestamp; ///< Timestamp of the event
+  int64_t entry;     ///< Entry method ID
+  int64_t event;     ///< Event ID
+  int64_t pe;        ///< Processing element (PE) ID
+  bool open;         ///< Whether this is an opening event
 };
 
 /**

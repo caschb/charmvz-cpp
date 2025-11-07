@@ -10,13 +10,14 @@
 
 /**
  * @class LogReader
- * @brief Provides sequential access to log entries from compressed Charm++ log files
+ * @brief Provides sequential access to log entries from compressed Charm++ log
+ * files
  */
 class LogReader {
 private:
-  std::string log_file_path;        ///< Path to the log file being read
-  zstr::ifstream log_stream;        ///< Compressed file input stream
-  LogEntry last_begin_event;        ///< Last BEGIN event encountered
+  std::string log_file_path; ///< Path to the log file being read
+  zstr::ifstream log_stream; ///< Compressed file input stream
+  LogEntry last_begin_event; ///< Last BEGIN event encountered
 
 public:
   /**
@@ -29,24 +30,24 @@ public:
     std::string first_line;
     std::getline(this->log_stream, first_line);
   }
-  
+
   /**
    * @brief Destructor
    */
   ~LogReader();
-  
+
   /**
    * @brief Read and return the next log entry
    * @return The next LogEntry from the file
    */
   LogEntry nextEntry();
-  
+
   /**
    * @brief Check if there are more entries to read
    * @return true if more entries are available, false otherwise
    */
   bool hasNextEntry();
-  
+
   /**
    * @brief Get the last BEGIN event that was read
    * @return Pointer to the last BEGIN event, or nullptr if none
