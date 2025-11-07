@@ -1,17 +1,22 @@
 #include "timeline.h"
 #include "log_entry.h"
 #include "log_reader.h"
+#include <climits>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <regex>
 #include <spdlog/spdlog.h>
+#include <string>
+#include <string_view>
 
-int64_t extract_log_id(const std::string_view &log_file_path) {
+namespace {
+auto extract_log_id(const std::string_view &log_file_path) {
   std::string log_file_name =
       std::filesystem::path(log_file_path).filename().string();
   std::smatch match;
-  std::regex log_regex(R"(.*\.prj\.(\d+)\.log\.gz$)");
+  const std::regex log_regex(R"(.*\.prj\.(\d+)\.log\.gz$)");
   int64_t id = -1;
   if (std::regex_match(log_file_name, match, log_regex)) {
     id = std::stoi(match[1]);
@@ -22,9 +27,10 @@ int64_t extract_log_id(const std::string_view &log_file_path) {
   return id;
 }
 
-Timeline create_timeline(const std::string_view log_file_path,
-                         int64_t begin_time, int64_t end_time,
-                         int64_t min_entry_duration) {
+} // namespace
+
+auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
+                     int64_t end_time, int64_t min_entry_duration) -> Timeline {
   Timeline timeline;
   timeline.log_id = extract_log_id(log_file_path);
 
@@ -39,7 +45,7 @@ Timeline create_timeline(const std::string_view log_file_path,
   TimelineEvent *current_timeline_event = nullptr;
   std::unique_ptr<TimelineEvent> current_te_holder;
   PackTime *current_pack_time = nullptr;
-  LogEntry last_begin_event;
+  LogEntry last_begin_event{};
 
   // Track statistics
   timeline.total_events_processed = 0;
@@ -222,7 +228,7 @@ Timeline create_timeline(const std::string_view log_file_path,
         }
 
         // Add pack time to current event
-        PackTime pack_time(log_entry.timestamp);
+        const PackTime pack_time(log_entry.timestamp);
         current_timeline_event->add_pack_time(pack_time);
         current_pack_time = &current_timeline_event->pack_times.back();
         break;
@@ -263,7 +269,7 @@ Timeline create_timeline(const std::string_view log_file_path,
                       log_entry.mtype);
 
         // Create message record
-        TimelineMessage message;
+        TimelineMessage message{};
         message.send_time = log_entry.timestamp;
         message.msg_id = log_entry.event;
         message.size = log_entry.mtype;
@@ -330,6 +336,6 @@ Timeline create_timeline(const std::string_view log_file_path,
 }
 
 // Backward-compatible overload
-Timeline create_timeline(const std::string_view log_file_path) {
+auto create_timeline(const std::string_view log_file_path) -> Timeline {
   return create_timeline(log_file_path, 0, LLONG_MAX, 0);
 }

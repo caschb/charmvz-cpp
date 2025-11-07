@@ -1,30 +1,38 @@
 #include "writer.h"
-#include "arrow/status.h"
-#include "arrow/type.h"
-#include "arrow/type_fwd.h"
+#include "src/utils/timeline.h"
 #include <arrow/api.h>
-#include <arrow/io/api.h>
+#include <arrow/io/file.h>
+#include <arrow/status.h>
+#include <arrow/type.h>
+#include <arrow/type_fwd.h>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <memory>
 #include <parquet/arrow/writer.h>
 #include <spdlog/spdlog.h>
+#include <string>
+#include <vector>
 
-arrow::Status CreateInt64Array(const std::vector<int64_t> &values,
-                               std::shared_ptr<arrow::Array> *out_array) {
-  arrow::Int64Builder builder;
+namespace {
+auto CreateInt64Array(const std::vector<int64_t> &values,
+                      std::shared_ptr<arrow::Array> *out_array) {
+  arrow::Int64Builder builder{};
   ARROW_RETURN_NOT_OK(builder.Reserve(values.size()));
   ARROW_RETURN_NOT_OK(builder.AppendValues(values));
 
   return builder.Finish(out_array);
 }
 
-arrow::Status CreateStringArray(const std::vector<std::string> &values,
-                                std::shared_ptr<arrow::Array> *out_array) {
-  arrow::StringBuilder builder;
+auto CreateStringArray(const std::vector<std::string> &values,
+                       std::shared_ptr<arrow::Array> *out_array) {
+  arrow::StringBuilder builder{};
   ARROW_RETURN_NOT_OK(builder.Reserve(values.size()));
   ARROW_RETURN_NOT_OK(builder.AppendValues(values));
 
   return builder.Finish(out_array);
 }
+} // namespace
 
 // Writes the timeline as a parquet file
 void write_timeline(const Timeline &timeline) {
@@ -77,7 +85,7 @@ void write_timeline(const Timeline &timeline) {
     // Helper lambda to create int64 arrays and handle errors
     auto make_int64_array = [&](const std::vector<int64_t> &values,
                                 std::shared_ptr<arrow::Array> &array,
-                                const char *name) {
+                                const char *name) -> bool {
       auto status = CreateInt64Array(values, &array);
       if (!status.ok()) {
         spdlog::error("Failed to create {} array", name);
@@ -86,10 +94,20 @@ void write_timeline(const Timeline &timeline) {
       return true;
     };
 
-    std::shared_ptr<arrow::Array> log_id_array, event_index_array,
-        begin_time_array, end_time_array, recv_time_array, event_id_array,
-        pe_array, entry_point_array, message_size_array, cpu_begin_array,
-        cpu_end_array, mtype_array, message_count_array, pack_time_count_array;
+    std::shared_ptr<arrow::Array> log_id_array;
+    std::shared_ptr<arrow::Array> event_index_array;
+    std::shared_ptr<arrow::Array> begin_time_array;
+    std::shared_ptr<arrow::Array> end_time_array;
+    std::shared_ptr<arrow::Array> recv_time_array;
+    std::shared_ptr<arrow::Array> event_id_array;
+    std::shared_ptr<arrow::Array> pe_array;
+    std::shared_ptr<arrow::Array> entry_point_array;
+    std::shared_ptr<arrow::Array> message_size_array;
+    std::shared_ptr<arrow::Array> cpu_begin_array;
+    std::shared_ptr<arrow::Array> cpu_end_array;
+    std::shared_ptr<arrow::Array> mtype_array;
+    std::shared_ptr<arrow::Array> message_count_array;
+    std::shared_ptr<arrow::Array> pack_time_count_array;
 
     if (!make_int64_array(log_ids, log_id_array, "log_id") ||
         !make_int64_array(event_indices, event_index_array, "event_index") ||
@@ -144,7 +162,7 @@ void write_timeline(const Timeline &timeline) {
          user_event_name_array, message_count_array, pack_time_count_array});
 
     // Create table
-    auto table_result = arrow::Table::FromRecordBatches({record_batch});
+    const auto &table_result = arrow::Table::FromRecordBatches({record_batch});
     if (!table_result.ok()) {
       spdlog::error("Failed to create Arrow table: {}",
                     table_result.status().ToString());
@@ -159,10 +177,10 @@ void write_timeline(const Timeline &timeline) {
                     output_result.status().ToString());
       return;
     }
-    auto output = *output_result;
-
+    const auto &output = *output_result;
+    constexpr auto default_chunk_size = 1024;
     auto write_result = parquet::arrow::WriteTable(
-        *table, arrow::default_memory_pool(), output, 1024);
+        *table, arrow::default_memory_pool(), output, default_chunk_size);
     if (!write_result.ok()) {
       spdlog::error("Failed to write parquet file: {}",
                     write_result.ToString());

@@ -8,8 +8,8 @@
 
 LogReader::~LogReader() { this->log_stream.close(); }
 
-LogEntry LogReader::nextEntry() {
-  LogEntry entry;
+auto LogReader::nextEntry() -> LogEntry {
+  LogEntry entry{};
   std::istringstream log_line_stream;
   std::string log_line;
   std::getline(this->log_stream, log_line);
@@ -82,11 +82,11 @@ LogEntry LogReader::nextEntry() {
   return entry;
 }
 
-bool LogReader::hasNextEntry() {
-  char peek_char = this->log_stream.peek();
+auto LogReader::hasNextEntry() -> bool {
+  const int peek_char = this->log_stream.peek();
   return !this->log_stream.eof() && peek_char != '\n';
 }
 
-const LogEntry *LogReader::getLastBeginEvent() const {
+auto LogReader::getLastBeginEvent() const -> const LogEntry * {
   return &this->last_begin_event;
 }

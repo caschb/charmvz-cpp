@@ -54,7 +54,7 @@ struct LogEntry {
  * @param type The LogType to convert
  * @return String representation of the log type
  */
-std::string to_string(const LogType &type);
+auto to_string(const LogType &type) -> const char *;
 
 /**
  * @brief Formatter specialization for LogEntry to enable formatted output

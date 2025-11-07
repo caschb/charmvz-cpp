@@ -1,7 +1,7 @@
 #include "log_entry.h"
-#include <string>
+#include <stdexcept>
 
-std::string to_string(const LogType &type) {
+auto to_string(const LogType &type) -> const char * {
   switch (type) {
   case LogType::UNKNOWN:
     return "UNKNOWN";

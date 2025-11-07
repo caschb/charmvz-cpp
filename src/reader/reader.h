@@ -58,7 +58,7 @@ struct StsData {
  * @return StsData Structure containing chares, entries, and messages from the
  * file
  */
-StsData read_sts_file(const std::string_view sts_file_path);
+auto read_sts_file(const std::string_view sts_file_path) -> StsData;
 
 /**
  * @brief Reads and parses multiple log files into Timeline objects.
@@ -67,7 +67,7 @@ StsData read_sts_file(const std::string_view sts_file_path);
  * @return std::vector<Timeline> Vector of Timeline objects parsed from the log
  * files
  */
-std::vector<Timeline>
-read_log_files(const std::vector<std::string> &log_file_paths);
+auto read_log_files(const std::vector<std::string> &log_file_paths)
+    -> std::vector<Timeline>;
 
 #endif

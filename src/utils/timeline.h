@@ -90,11 +90,10 @@ struct Timeline {
  * @return Complete timeline with all events
  */
 // Backward-compatible overload (preserves original API)
-Timeline create_timeline(const std::string_view log_file_path);
+auto create_timeline(const std::string_view log_file_path) -> Timeline;
 
 // Extended version with time range and filtering
-Timeline create_timeline(const std::string_view log_file_path,
-                         int64_t begin_time, int64_t end_time,
-                         int64_t min_entry_duration);
+auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
+                     int64_t end_time, int64_t min_entry_duration) -> Timeline;
 
 #endif

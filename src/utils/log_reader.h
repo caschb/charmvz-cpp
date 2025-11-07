@@ -40,18 +40,18 @@ public:
    * @brief Read and return the next log entry
    * @return The next LogEntry from the file
    */
-  LogEntry nextEntry();
+  auto nextEntry() -> LogEntry;
 
   /**
    * @brief Check if there are more entries to read
    * @return true if more entries are available, false otherwise
    */
-  bool hasNextEntry();
+  auto hasNextEntry() -> bool;
 
   /**
    * @brief Get the last BEGIN event that was read
    * @return Pointer to the last BEGIN event, or nullptr if none
    */
-  const LogEntry *getLastBeginEvent() const;
+  auto getLastBeginEvent() const -> const LogEntry *;
 };
 #endif

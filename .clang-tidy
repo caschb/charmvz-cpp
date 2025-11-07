@@ -1,0 +1,19 @@
+---
+Checks: "*,
+        -abseil-*,
+        -altera-*,
+        -android-*,
+        -fuchsia-*,
+        -google-*,
+        -llvm*,
+        -zircon-*
+"
+
+WarningsAsErrors: ''
+HeaderFilterRegex: ''
+FormatStyle:     none
+CheckOptions:
+  - { key: readability-identifier-length.IgnoredVariableNames, value: '^i$|^j$|^k$|^x$|^y$|^z$|^id$' }
+SystemHeaders:   false
+...
+
