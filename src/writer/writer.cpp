@@ -5,6 +5,7 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
