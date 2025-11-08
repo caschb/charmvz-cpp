@@ -9,7 +9,7 @@
 LogReader::~LogReader() { this->log_stream.close(); }
 
 auto LogReader::nextEntry() -> LogEntry {
-  LogEntry entry{};
+  LogEntry log_entry{};
   std::istringstream log_line_stream;
   std::string log_line;
   std::getline(this->log_stream, log_line);
@@ -20,66 +20,81 @@ auto LogReader::nextEntry() -> LogEntry {
 
   switch (static_cast<LogType>(token)) {
   case LogType::CREATION:
-    entry.type = LogType::CREATION;
-    log_line_stream >> entry.mtype >> entry.entry >> entry.timestamp >>
-        entry.event >> entry.pe;
-    return entry;
+    log_entry.type = LogType::CREATION;
+    log_line_stream >> log_entry.mtype >> log_entry.entry_point >>
+        log_entry.timestamp >> log_entry.event >> log_entry.pe >>
+        log_entry.mtype >> log_entry.send_time;
+    return log_entry;
   case LogType::BEGIN_PROCESSING:
-    entry.type = LogType::BEGIN_PROCESSING;
-    spdlog::debug("{}", log_line);
+    log_entry.type = LogType::BEGIN_PROCESSING;
+    log_line_stream >> log_entry.mtype >> log_entry.entry_point >>
+        log_entry.timestamp >> log_entry.event >> log_entry.pe >>
+        log_entry.mtype >> log_entry.recv_time;
     break;
   case LogType::END_PROCESSING:
-    entry.type = LogType::END_PROCESSING;
+    log_entry.type = LogType::END_PROCESSING;
+    log_line_stream >> log_entry.mtype >> log_entry.entry_point >>
+        log_entry.timestamp >> log_entry.event >> log_entry.pe >>
+        log_entry.mtype;
     break;
   case LogType::BEGIN_COMPUTATION:
-    entry.type = LogType::BEGIN_COMPUTATION;
+    log_entry.type = LogType::BEGIN_COMPUTATION;
     break;
   case LogType::END_COMPUTATION:
-    entry.type = LogType::END_COMPUTATION;
+    log_entry.type = LogType::END_COMPUTATION;
+    log_line_stream >> log_entry.timestamp;
     break;
   case LogType::USER_EVENT:
-    entry.type = LogType::USER_EVENT;
+    log_entry.type = LogType::USER_EVENT;
+    spdlog::debug("USER_EVENT:{}", log_line);
     break;
   case LogType::BEGIN_IDLE:
-    entry.type = LogType::BEGIN_IDLE;
-    log_line_stream >> entry.timestamp >> entry.pe;
-    this->last_begin_event = entry;
+    log_entry.type = LogType::BEGIN_IDLE;
+    log_line_stream >> log_entry.timestamp >> log_entry.pe;
+    this->last_begin_event = log_entry;
     this->last_begin_event.open = true;
     break;
   case LogType::END_IDLE:
-    entry.type = LogType::END_IDLE;
-    log_line_stream >> entry.timestamp >> entry.pe;
-    this->last_begin_event = entry;
+    log_entry.type = LogType::END_IDLE;
+    log_line_stream >> log_entry.timestamp >> log_entry.pe;
+    this->last_begin_event = log_entry;
     this->last_begin_event.open = false;
     break;
   case LogType::BEGIN_PACK:
-    entry.type = LogType::BEGIN_PACK;
+    log_entry.type = LogType::BEGIN_PACK;
+    log_line_stream >> log_entry.timestamp >> log_entry.pe;
     break;
   case LogType::END_PACK:
-    entry.type = LogType::END_PACK;
+    log_entry.type = LogType::END_PACK;
+    log_line_stream >> log_entry.timestamp >> log_entry.pe;
     break;
   case LogType::BEGIN_UNPACK:
-    entry.type = LogType::BEGIN_UNPACK;
+    log_entry.type = LogType::BEGIN_UNPACK;
+    log_line_stream >> log_entry.timestamp >> log_entry.pe;
     break;
   case LogType::END_UNPACK:
-    entry.type = LogType::END_UNPACK;
+    log_entry.type = LogType::END_UNPACK;
+    log_line_stream >> log_entry.timestamp >> log_entry.pe;
     break;
   case LogType::CREATION_BCAST:
-    entry.type = LogType::CREATION_BCAST;
+    log_entry.type = LogType::CREATION_BCAST;
+    log_line_stream >> log_entry.mtype >> log_entry.entry_point >>
+        log_entry.timestamp >> log_entry.event >> log_entry.pe >>
+        log_entry.mtype >> log_entry.send_time >> log_entry.num_pes;
     break;
   case LogType::END_PHASE:
-    entry.type = LogType::END_PHASE;
+    log_entry.type = LogType::END_PHASE;
     break;
   case LogType::USER_EVENT_PAIR:
-    entry.type = LogType::USER_EVENT_PAIR;
+    log_entry.type = LogType::USER_EVENT_PAIR;
     break;
   default:
     spdlog::warn("Unknown log type: {}, {}", token, log_line);
-    entry.type = LogType::UNKNOWN;
+    log_entry.type = LogType::UNKNOWN;
     break;
   }
 
-  return entry;
+  return log_entry;
 }
 
 auto LogReader::hasNextEntry() -> bool {
@@ -88,5 +103,8 @@ auto LogReader::hasNextEntry() -> bool {
 }
 
 auto LogReader::getLastBeginEvent() const -> const LogEntry * {
-  return &this->last_begin_event;
+  if (last_begin_event.open) {
+    return &this->last_begin_event;
+  }
+  return nullptr;
 }

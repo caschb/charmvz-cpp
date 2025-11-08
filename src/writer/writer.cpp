@@ -64,6 +64,11 @@ void write_timeline(const Timeline &timeline) {
     for (size_t i = 0; i < timeline.events.size(); ++i) {
       const auto &event = timeline.events[i];
 
+      if (event.end_time == LLONG_MAX) {
+        spdlog::warn("Timeline event {},  has invalid end_time=LLONG_MAX, "
+                     "mtype={}",
+                     i, event.mtype);
+      }
       log_ids.push_back(timeline.log_id);
       event_indices.push_back(static_cast<int64_t>(i));
       begin_times.push_back(event.begin_time);

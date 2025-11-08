@@ -4,8 +4,8 @@
 #include <vector>
 
 // Constants for special entry points (matching Projections Analysis.java)
-static constexpr int64_t IDLE_ENTRY_POINT = -1;
-static constexpr int64_t OVERHEAD_ENTRY_POINT = -2;
+static constexpr int64_t IDLE_ENTRY_POINT = -10;
+static constexpr int64_t OVERHEAD_ENTRY_POINT = -20;
 
 struct TimelineMessage {
   int64_t send_time;
@@ -18,7 +18,7 @@ struct PackTime {
   int64_t begin_time;
   int64_t end_time;
 
-  PackTime(int64_t bt) : begin_time(bt), end_time(-1) {}
+  PackTime(int64_t begin_time) : begin_time(begin_time), end_time(-1) {}
 };
 
 /**
@@ -49,16 +49,17 @@ struct TimelineEvent {
         entry_point(-1), message_size(-1), cpu_begin(-1), cpu_end(-1),
         mtype(-1) {}
 
-  TimelineEvent(int64_t bt, int64_t et, int64_t ep, int64_t processor)
-      : begin_time(bt), end_time(et), recv_time(-1), event_id(-1),
-        pe(processor), entry_point(ep), message_size(-1), cpu_begin(-1),
-        cpu_end(-1), mtype(-1) {}
+  TimelineEvent(int64_t begin_time, int64_t end_time, int64_t entry_point,
+                int64_t processor)
+      : begin_time(begin_time), end_time(end_time), recv_time(-1), event_id(-1),
+        pe(processor), entry_point(entry_point), message_size(-1),
+        cpu_begin(-1), cpu_end(-1), mtype(-1) {}
 
-  TimelineEvent(int64_t bt, int64_t et, int64_t ep, int64_t processor,
-                int64_t msg_len)
-      : begin_time(bt), end_time(et), recv_time(-1), event_id(-1),
-        pe(processor), entry_point(ep), message_size(msg_len), cpu_begin(-1),
-        cpu_end(-1), mtype(-1) {}
+  TimelineEvent(int64_t begin_time, int64_t end_time, int64_t entry_point,
+                int64_t processor, int64_t msg_len)
+      : begin_time(begin_time), end_time(end_time), recv_time(-1), event_id(-1),
+        pe(processor), entry_point(entry_point), message_size(msg_len),
+        cpu_begin(-1), cpu_end(-1), mtype(-1) {}
 
   void add_message(const TimelineMessage &msg) { messages.push_back(msg); }
 

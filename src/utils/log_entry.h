@@ -40,13 +40,16 @@ enum class LogType {
  * @brief Represents a single entry from a Charm++ log file
  */
 struct LogEntry {
-  LogType type;      ///< Type of log entry
-  int64_t mtype;     ///< Message type ID
-  int64_t timestamp; ///< Timestamp of the event
-  int64_t entry;     ///< Entry method ID
-  int64_t event;     ///< Event ID
-  int64_t pe;        ///< Processing element (PE) ID
-  bool open;         ///< Whether this is an opening event
+  LogType type;        ///< Type of log entry
+  int64_t mtype;       ///< Message type ID
+  int64_t timestamp;   ///< Timestamp of the event
+  int64_t entry_point; ///< Entry method ID
+  int64_t event;       ///< Event ID
+  int64_t pe;          ///< Processing element (PE) ID
+  int64_t num_pes;     ///< Number of PEs involved (for broadcasts)
+  int64_t send_time;   ///< Send time for messages
+  int64_t recv_time;   ///< Receive time for messages
+  bool open;           ///< Whether this is an opening event
 };
 
 /**
@@ -70,7 +73,7 @@ template <> struct spdlog::fmt_lib::formatter<LogEntry> {
         ctx.out(),
         "LogEntry{{type: {}, mtype: {}, timestamp: {}, "
         "entry: {}, event: {}, pe: {}}}",
-        to_string(entry.type), entry.mtype, entry.timestamp, entry.entry,
+        to_string(entry.type), entry.mtype, entry.timestamp, entry.entry_point,
         entry.event, entry.pe);
   }
 };

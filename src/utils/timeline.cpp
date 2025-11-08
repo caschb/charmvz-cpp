@@ -44,7 +44,6 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
   TimelineEvent *current_timeline_event = nullptr;
   std::unique_ptr<TimelineEvent> current_te_holder;
   PackTime *current_pack_time = nullptr;
-  LogEntry last_begin_event{};
 
   // Track statistics
   timeline.total_events_processed = 0;
@@ -56,37 +55,58 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
     timeline.total_events_processed++;
 
     // Skip events outside time range for non-idle events
-    if (log_entry.entry != IDLE_ENTRY_POINT) {
+    if (log_entry.entry_point != IDLE_ENTRY_POINT) {
       if (log_entry.timestamp < begin_time || log_entry.timestamp > end_time) {
         continue;
       }
     }
 
     spdlog::trace("Processing log entry: type={}, entry={}, time={}, pe={}",
-                  static_cast<int>(log_entry.type), log_entry.entry,
+                  static_cast<int>(log_entry.type), log_entry.entry_point,
                   log_entry.timestamp, log_entry.pe);
-
+    bool temp_te = false;
     switch (log_entry.type) {
 
     case LogType::BEGIN_COMPUTATION: {
       spdlog::trace("BEGIN_COMPUTATION: entry={}, pe={}, time={}",
-                    log_entry.entry, log_entry.pe, log_entry.timestamp);
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp);
       break;
     }
 
     case LogType::END_COMPUTATION: {
       spdlog::trace("END_COMPUTATION: entry={}, pe={}, time={}",
-                    log_entry.entry, log_entry.pe, log_entry.timestamp);
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp);
+      if (is_processing) {
+        // Add a "pretend" end event to accommodate the prior begin processing
+        if (current_timeline_event != nullptr) {
+          current_timeline_event->end_time = log_entry.timestamp;
+
+          // If the entry was not long enough, remove it from the timeline
+          if (current_timeline_event->end_time -
+                  current_timeline_event->begin_time <
+              min_entry_duration) {
+            spdlog::trace(
+                "Filtered out short event: duration={}, begin={}, end={}",
+                current_timeline_event->end_time -
+                    current_timeline_event->begin_time,
+                current_timeline_event->begin_time,
+                current_timeline_event->end_time);
+            if (!timeline.events.empty()) {
+              timeline.events.pop_back();
+              timeline.events_filtered_by_duration++;
+            }
+          }
+        }
+        current_timeline_event = nullptr;
+        current_te_holder.reset();
+        is_processing = false;
+      }
       break;
     }
 
     case LogType::BEGIN_PROCESSING: {
       spdlog::trace("BEGIN_PROCESSING: entry={}, pe={}, time={}",
-                    log_entry.entry, log_entry.pe, log_entry.timestamp);
-
-      // Clear last begin event
-      last_begin_event = LogEntry();
-
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp);
       if (is_processing) {
         // Add a "pretend" end event to accommodate the prior begin processing
         // event
@@ -97,6 +117,12 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
           if (current_timeline_event->end_time -
                   current_timeline_event->begin_time <
               min_entry_duration) {
+            spdlog::trace(
+                "Filtered out short event: duration={}, begin={}, end={}",
+                current_timeline_event->end_time -
+                    current_timeline_event->begin_time,
+                current_timeline_event->begin_time,
+                current_timeline_event->end_time);
             if (!timeline.events.empty()) {
               timeline.events.pop_back();
               timeline.events_filtered_by_duration++;
@@ -111,15 +137,19 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
 
       // Create new timeline event
       current_te_holder = std::make_unique<TimelineEvent>(
-          log_entry.timestamp, // begin_time
-          log_entry.timestamp, // end_time (temporary)
-          log_entry.entry,     // entry_point
-          log_entry.pe,        // processor
-          log_entry.mtype      // message size/type
+          log_entry.timestamp,   // begin_time
+          log_entry.timestamp,   // end_time (temporary)
+          log_entry.entry_point, // entry_point
+          log_entry.pe,          // processor
+          log_entry.mtype        // message size/type
       );
       current_te_holder->event_id = log_entry.event;
       current_te_holder->mtype = log_entry.mtype;
 
+      if (current_te_holder->end_time == LLONG_MAX) {
+        spdlog::warn(
+            "BEGIN_COMPUTATION log entry has invalid end_time=LLONG_MAX");
+      }
       timeline.events.push_back(*current_te_holder);
       current_timeline_event = &timeline.events.back();
       timeline.timeline_events_created++;
@@ -132,11 +162,8 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
     }
 
     case LogType::END_PROCESSING: {
-      spdlog::trace("END_PROCESSING: entry={}, pe={}, time={}", log_entry.entry,
-                    log_entry.pe, log_entry.timestamp);
-
-      // Clear last begin event
-      last_begin_event = LogEntry();
+      spdlog::trace("END_PROCESSING: entry={}, pe={}, time={}",
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp);
 
       if (current_timeline_event != nullptr) {
         current_timeline_event->end_time = log_entry.timestamp;
@@ -147,9 +174,12 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
             min_entry_duration) {
           timeline.events.pop_back();
           timeline.events_filtered_by_duration++;
-          spdlog::trace("Filtered out short event: duration={}",
+          spdlog::trace("Filtered out short event at end_processing: "
+                        "duration={}, begin={}, end={}",
                         current_timeline_event->end_time -
-                            current_timeline_event->begin_time);
+                            current_timeline_event->begin_time,
+                        current_timeline_event->begin_time,
+                        current_timeline_event->end_time);
         } else {
           spdlog::trace("Completed timeline event: duration={}",
                         current_timeline_event->end_time -
@@ -166,8 +196,6 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
     case LogType::BEGIN_IDLE: {
       spdlog::trace("BEGIN_IDLE: pe={}, time={}", log_entry.pe,
                     log_entry.timestamp);
-
-      last_begin_event = LogEntry();
 
       // Create idle timeline event
       current_te_holder = std::make_unique<TimelineEvent>(
@@ -190,12 +218,11 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
       spdlog::trace("END_IDLE: pe={}, time={}", log_entry.pe,
                     log_entry.timestamp);
 
-      last_begin_event = LogEntry();
-
       if (current_timeline_event != nullptr &&
           current_timeline_event->is_idle_event()) {
         current_timeline_event->end_time = log_entry.timestamp;
-
+        spdlog::trace("Set idle event end_time={}",
+                      current_timeline_event->end_time);
         // Check minimum duration for idle events too
         if (current_timeline_event->end_time -
                 current_timeline_event->begin_time <
@@ -204,7 +231,8 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
           timeline.events_filtered_by_duration++;
         }
       }
-
+      spdlog::trace("Completed idle event, end_time={}",
+                    current_timeline_event->end_time);
       current_timeline_event = nullptr;
       current_te_holder.reset();
       break;
@@ -234,7 +262,6 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
     case LogType::END_PACK: {
       spdlog::trace("END_PACK: pe={}, time={}", log_entry.pe,
                     log_entry.timestamp);
-
       if (current_pack_time != nullptr) {
         current_pack_time->end_time = log_entry.timestamp;
       }
@@ -262,9 +289,21 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
 
     case LogType::CREATION: {
       spdlog::trace("CREATION: entry={}, pe={}, time={}, msglen={}",
-                    log_entry.entry, log_entry.pe, log_entry.timestamp,
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp,
                     log_entry.mtype);
 
+      temp_te = false;
+      if (current_timeline_event == nullptr) {
+        // Create a temporary timeline event to hold messages until processing
+        // begins
+        current_te_holder = std::make_unique<TimelineEvent>(
+            log_entry.timestamp, log_entry.timestamp, OVERHEAD_ENTRY_POINT,
+            log_entry.pe, log_entry.mtype);
+        timeline.events.push_back(*current_te_holder);
+        current_timeline_event = &timeline.events.back();
+        timeline.timeline_events_created++;
+        temp_te = true;
+      }
       // Create message record
       TimelineMessage message{};
       message.send_time = log_entry.timestamp;
@@ -272,15 +311,21 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
       message.size = log_entry.mtype;
 
       // Add to current timeline event if we have one
-      if (current_timeline_event != nullptr) {
-        current_timeline_event->add_message(message);
+      current_timeline_event->add_message(message);
+      if (temp_te) {
+        current_timeline_event = nullptr;
+        current_te_holder.reset();
       }
+      spdlog::trace(
+          "CREATION: Added message to timeline event: send_time={}, msg_id={}, "
+          "size={}",
+          message.send_time, message.msg_id, message.size);
       break;
     }
 
     case LogType::USER_EVENT: {
-      spdlog::trace("USER_EVENT: entry={}, pe={}, time={}", log_entry.entry,
-                    log_entry.pe, log_entry.timestamp);
+      spdlog::trace("USER_EVENT: entry={}, pe={}, time={}",
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp);
       // For now, just log user events - could be enhanced to store them
       break;
     }
@@ -293,7 +338,43 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
 
     case LogType::USER_EVENT_PAIR: {
       spdlog::trace("USER_EVENT_PAIR: entry={}, pe={}, time={}",
-                    log_entry.entry, log_entry.pe, log_entry.timestamp);
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp);
+      break;
+    }
+
+    case LogType::CREATION_BCAST: {
+      spdlog::trace("CREATION_BCAST: entry={}, pe={}, time={}, msglen={}",
+                    log_entry.entry_point, log_entry.pe, log_entry.timestamp,
+                    log_entry.mtype);
+
+      temp_te = false;
+      if (current_timeline_event == nullptr) {
+        // Create a temporary timeline event to hold messages until processing
+        // begins
+        current_te_holder = std::make_unique<TimelineEvent>(
+            log_entry.timestamp, log_entry.timestamp, OVERHEAD_ENTRY_POINT,
+            log_entry.pe, log_entry.mtype);
+        timeline.events.push_back(*current_te_holder);
+        current_timeline_event = &timeline.events.back();
+        timeline.timeline_events_created++;
+        temp_te = true;
+      }
+      // Create message record
+      TimelineMessage message{};
+      message.send_time = log_entry.timestamp;
+      message.msg_id = log_entry.event;
+      message.size = log_entry.mtype;
+
+      // Add to current timeline event if we have one
+      current_timeline_event->add_message(message);
+      if (temp_te) {
+        current_timeline_event = nullptr;
+        current_te_holder.reset();
+      }
+      spdlog::trace(
+          "CREATION_BCAST: Added message to timeline event: send_time={}, "
+          "msg_id={}, size={}",
+          message.send_time, message.msg_id, message.size);
       break;
     }
 

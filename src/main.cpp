@@ -37,6 +37,8 @@ auto main(int argc, char **argv) -> int {
 
   auto sts_data = read_sts_file(sts_file_path);
   auto timelines = read_log_files(traces_paths);
-  write_timeline(timelines[0]);
+  for (auto &timeline : timelines) {
+    write_timeline(timeline);
+  }
   return 0;
 }
