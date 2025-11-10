@@ -33,6 +33,20 @@ test_deps = deps + dependency(
   required: false,
 )
 
+charmvz_lib = library(
+  'charmvz_lib',
+  [
+    'src/reader/reader.cpp',
+    'src/writer/writer.cpp',
+    'src/utils/log_entry.cpp',
+    'src/utils/log_reader.cpp',
+    'src/utils/timeline.cpp',
+  ],
+  include_directories: include_directories('src/include/'),
+  dependencies: deps,
+  install: true,
+)
+
 files = [
   'src/main.cpp',
   'src/reader/reader.cpp',
@@ -42,7 +56,13 @@ files = [
   'src/utils/timeline.cpp',
 ]
 
-executable('charmvz', files, dependencies: deps)
+executable(
+  'charmvz',
+  'src/main.cpp',
+  link_with: charmvz_lib,
+  include_directories: include_directories('src/include/'),
+  dependencies: deps,
+)
 
 # add tests
 test_files = [
@@ -55,5 +75,11 @@ test_files = [
 
 test(
   'reader tests',
-  executable('test_reader', test_files, dependencies: test_deps),
+  executable(
+    'test_reader',
+    test_files,
+    dependencies: test_deps,
+    link_with: charmvz_lib,
+    include_directories: include_directories('src/include/'),
+  ),
 )

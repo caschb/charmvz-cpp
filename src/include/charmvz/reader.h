@@ -3,9 +3,10 @@
  * @brief Functions and structures for reading Charm++ trace files
  */
 
-#ifndef READER_H
-#define READER_H
-#include "src/utils/timeline.h"
+#ifndef CHARMVZ_READER_H
+#define CHARMVZ_READER_H
+
+#include "charmvz/timeline.h"
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -58,7 +59,7 @@ struct StsData {
  * @return StsData Structure containing chares, entries, and messages from the
  * file
  */
-auto read_sts_file(const std::string_view sts_file_path) -> StsData;
+auto read_sts_file(std::string_view sts_file_path) -> StsData;
 
 /**
  * @brief Reads and parses multiple log files into Timeline objects.

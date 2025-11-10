@@ -3,10 +3,10 @@
  * @brief Functions for writing timeline data to output
  */
 
-#ifndef WRITER_H
-#define WRITER_H
+#ifndef CHARMVZ_WRITER_H
+#define CHARMVZ_WRITER_H
 
-#include "src/utils/timeline.h"
+#include "charmvz/timeline.h"
 
 /**
  * @brief Write a timeline to output

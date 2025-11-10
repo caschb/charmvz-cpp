@@ -1,5 +1,5 @@
-#ifndef TIMELINE_H
-#define TIMELINE_H
+#ifndef CHARMVZ_TIMELINE_H
+#define CHARMVZ_TIMELINE_H
 #include <string>
 #include <vector>
 

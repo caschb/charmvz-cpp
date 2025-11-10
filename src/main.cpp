@@ -1,8 +1,8 @@
 #include "CLI/CLI.hpp"
-#include "reader/reader.h"
+#include "charmvz/reader.h"
+#include "charmvz/writer.h"
 #include "spdlog/cfg/env.h"
 #include "spdlog/spdlog.h"
-#include "writer/writer.h"
 #include <exception>
 #include <filesystem>
 #include <string>
