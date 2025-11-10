@@ -1,3 +1,4 @@
+#include "charmvz/writer.h"
 #include "charmvz/timeline.h"
 #include <arrow/api.h>
 #include <arrow/io/file.h>

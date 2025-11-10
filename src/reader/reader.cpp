@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace {
-  using namespace charmvz;
+using namespace charmvz;
 
 // Example CHARE line: CHARE 11 "CkReductionMgr" -1
 auto parse_chare_line(const std::string_view line) {

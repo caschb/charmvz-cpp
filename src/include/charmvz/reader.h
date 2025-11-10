@@ -74,5 +74,4 @@ auto read_log_files(const std::vector<std::string> &log_file_paths)
 
 } // namespace charmvz
 
-
 #endif
