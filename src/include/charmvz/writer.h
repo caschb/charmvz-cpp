@@ -8,10 +8,13 @@
 
 #include "charmvz/timeline.h"
 
+namespace charmvz {
+
 /**
  * @brief Write a timeline to output
  * @param timeline The Timeline to write
  */
 void write_timeline(const Timeline &timeline);
 
+} // namespace charmvz
 #endif

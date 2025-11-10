@@ -35,10 +35,10 @@ auto main(int argc, char **argv) -> int {
 
   spdlog::debug("Total logs: {}", traces_paths.size());
 
-  auto sts_data = read_sts_file(sts_file_path);
-  auto timelines = read_log_files(traces_paths);
+  auto sts_data = charmvz::read_sts_file(sts_file_path);
+  auto timelines = charmvz::read_log_files(traces_paths);
   for (auto &timeline : timelines) {
-    write_timeline(timeline);
+    charmvz::write_timeline(timeline);
   }
   return 0;
 }

@@ -1,6 +1,6 @@
 #include "charmvz/timeline.h"
-#include "log_entry.h"
-#include "log_reader.h"
+#include "../utils/log_entry.h"
+#include "../utils/log_reader.h"
 #include <climits>
 #include <cstdint>
 #include <filesystem>
@@ -27,6 +27,8 @@ auto extract_log_id(const std::string_view &log_file_path) {
 }
 
 } // namespace
+
+namespace charmvz {
 
 auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
                      int64_t end_time, int64_t min_entry_duration) -> Timeline {
@@ -411,3 +413,4 @@ auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
 auto create_timeline(const std::string_view log_file_path) -> Timeline {
   return create_timeline(log_file_path, 0, LLONG_MAX, 0);
 }
+} // namespace charmvz

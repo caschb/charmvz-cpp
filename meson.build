@@ -3,6 +3,7 @@ project(
   'cpp',
   default_options: ['warning_level=3', 'cpp_std=c++20'],
 )
+
 deps = []
 # add spdlog as a dependency
 deps += dependency('spdlog', version: '>=1.15.3', required: true)
@@ -38,23 +39,14 @@ charmvz_lib = library(
   [
     'src/reader/reader.cpp',
     'src/writer/writer.cpp',
+    'src/timeline/timeline.cpp',
     'src/utils/log_entry.cpp',
     'src/utils/log_reader.cpp',
-    'src/utils/timeline.cpp',
   ],
   include_directories: include_directories('src/include/'),
   dependencies: deps,
   install: true,
 )
-
-files = [
-  'src/main.cpp',
-  'src/reader/reader.cpp',
-  'src/writer/writer.cpp',
-  'src/utils/log_entry.cpp',
-  'src/utils/log_reader.cpp',
-  'src/utils/timeline.cpp',
-]
 
 executable(
   'charmvz',
@@ -64,20 +56,17 @@ executable(
   dependencies: deps,
 )
 
-# add tests
-test_files = [
-  'tests/test_reader.cpp',
-  'src/reader/reader.cpp',
-  'src/utils/log_entry.cpp',
-  'src/utils/log_reader.cpp',
-  'src/utils/timeline.cpp',
-]
-
 test(
   'reader tests',
   executable(
     'test_reader',
-    test_files,
+    [
+      'tests/test_reader.cpp',
+      'src/reader/reader.cpp',
+      'src/timeline/timeline.cpp',
+      'src/utils/log_entry.cpp',
+      'src/utils/log_reader.cpp',
+    ],
     dependencies: test_deps,
     link_with: charmvz_lib,
     include_directories: include_directories('src/include/'),

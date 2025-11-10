@@ -2,6 +2,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <string>
 
+using namespace charmvz;
+
 // Dummy test to ensure Catch2 is properly set up
 TEST_CASE("Dummy test", "[dummy]") { REQUIRE(1 + 1 == 2); }
 

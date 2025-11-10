@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+namespace charmvz {
+
 // Constants for special entry points (matching Projections Analysis.java)
 static constexpr int64_t IDLE_ENTRY_POINT = -10;
 static constexpr int64_t OVERHEAD_ENTRY_POINT = -20;
@@ -96,5 +98,6 @@ auto create_timeline(const std::string_view log_file_path) -> Timeline;
 // Extended version with time range and filtering
 auto create_timeline(const std::string_view log_file_path, int64_t begin_time,
                      int64_t end_time, int64_t min_entry_duration) -> Timeline;
+} // namespace charmvz
 
 #endif

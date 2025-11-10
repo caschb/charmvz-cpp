@@ -10,6 +10,8 @@
 #include <vector>
 
 namespace {
+  using namespace charmvz;
+
 // Example CHARE line: CHARE 11 "CkReductionMgr" -1
 auto parse_chare_line(const std::string_view line) {
   std::istringstream line_stream{std::string{line}};
@@ -56,6 +58,8 @@ auto parse_message_line(const std::string_view line) {
 
 } // namespace
 
+namespace charmvz {
+
 auto read_sts_file(const std::string_view sts_file_path) -> StsData {
   spdlog::debug("Reading {}", sts_file_path);
   std::ifstream sts_file{std::string(sts_file_path), std::ios::in};
@@ -96,3 +100,4 @@ auto read_log_files(const std::vector<std::string> &log_file_paths)
   }
   return timelines;
 }
+} // namespace charmvz

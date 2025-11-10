@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+namespace charmvz {
 /**
  * @struct Chare
  * @brief Represents a Charm++ chare definition
@@ -70,5 +71,8 @@ auto read_sts_file(std::string_view sts_file_path) -> StsData;
  */
 auto read_log_files(const std::vector<std::string> &log_file_paths)
     -> std::vector<Timeline>;
+
+} // namespace charmvz
+
 
 #endif

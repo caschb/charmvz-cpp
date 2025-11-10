@@ -34,6 +34,8 @@ auto CreateStringArray(const std::vector<std::string> &values,
 }
 } // namespace
 
+namespace charmvz {
+
 // Writes the timeline as a parquet file
 void write_timeline(const Timeline &timeline) {
   try {
@@ -212,3 +214,5 @@ void write_timeline(const Timeline &timeline) {
     spdlog::error("Exception while writing timeline to parquet: {}", e.what());
   }
 }
+
+} // namespace charmvz
