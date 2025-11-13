@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -89,13 +90,34 @@ auto read_sts_file(const std::string_view sts_file_path) -> StsData {
   return StsData{.chares = chares, .entries = entries, .messages = messages};
 }
 
-auto read_log_files(const std::vector<std::string> &log_file_paths)
-    -> std::vector<Timeline> {
+auto read_log_files(const std::vector<std::string> &log_file_paths,
+                    const StsData &sts_data) -> std::vector<Timeline> {
   spdlog::debug("Reading {} log files", log_file_paths.size());
+
+  std::unordered_map<int64_t, std::string> entry_name_lookup;
+  entry_name_lookup.reserve(sts_data.entries.size());
+  for (const auto &entry : sts_data.entries) {
+    entry_name_lookup.emplace(entry.idx, entry.name);
+  }
+
   std::vector<Timeline> timelines;
   for (const auto &log_file_path : log_file_paths) {
     spdlog::debug("Reading log file: {}", log_file_path);
     auto timeline = create_timeline(log_file_path);
+
+    for (auto &event : timeline.events) {
+      const auto iter = entry_name_lookup.find(event.entry_point);
+      if (iter != entry_name_lookup.end()) {
+        event.entry_name = iter->second;
+      } else if (event.entry_point == IDLE_ENTRY_POINT) {
+        event.entry_name = "IDLE";
+      } else if (event.entry_point == OVERHEAD_ENTRY_POINT) {
+        event.entry_name = "OVERHEAD";
+      } else {
+        event.entry_name.clear();
+      }
+    }
+
     timelines.push_back(timeline);
   }
   return timelines;

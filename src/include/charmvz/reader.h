@@ -69,8 +69,8 @@ auto read_sts_file(std::string_view sts_file_path) -> StsData;
  * @return std::vector<Timeline> Vector of Timeline objects parsed from the log
  * files
  */
-auto read_log_files(const std::vector<std::string> &log_file_paths)
-    -> std::vector<Timeline>;
+auto read_log_files(const std::vector<std::string> &log_file_paths,
+                    const StsData &sts_data) -> std::vector<Timeline>;
 
 } // namespace charmvz
 

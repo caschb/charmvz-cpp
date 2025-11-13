@@ -45,6 +45,7 @@ struct TimelineEvent {
 
   // User event association
   std::string user_event_name;
+  std::string entry_name;
 
   TimelineEvent()
       : begin_time(-1), end_time(-1), recv_time(-1), event_id(-1), pe(-1),

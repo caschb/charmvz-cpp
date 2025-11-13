@@ -55,6 +55,7 @@ void write_timeline(const Timeline &timeline) {
     std::vector<int64_t> event_ids;
     std::vector<int64_t> pes;
     std::vector<int64_t> entry_points;
+    std::vector<std::string> entry_names;
     std::vector<int64_t> message_sizes;
     std::vector<int64_t> cpu_begins;
     std::vector<int64_t> cpu_ends;
@@ -80,6 +81,7 @@ void write_timeline(const Timeline &timeline) {
       event_ids.push_back(event.event_id);
       pes.push_back(event.pe);
       entry_points.push_back(event.entry_point);
+      entry_names.push_back(event.entry_name);
       message_sizes.push_back(event.message_size);
       cpu_begins.push_back(event.cpu_begin);
       cpu_ends.push_back(event.cpu_end);
@@ -136,8 +138,15 @@ void write_timeline(const Timeline &timeline) {
       return;
     }
 
+    std::shared_ptr<arrow::Array> entry_name_array;
+    auto status = CreateStringArray(entry_names, &entry_name_array);
+    if (!status.ok()) {
+      spdlog::error("Failed to create entry_name array");
+      return;
+    }
+
     std::shared_ptr<arrow::Array> user_event_name_array;
-    auto status = CreateStringArray(user_event_names, &user_event_name_array);
+    status = CreateStringArray(user_event_names, &user_event_name_array);
     if (!status.ok()) {
       spdlog::error("Failed to create user_event_name array");
       return;
@@ -153,6 +162,7 @@ void write_timeline(const Timeline &timeline) {
                        arrow::field("event_id", arrow::int64()),
                        arrow::field("pe", arrow::int64()),
                        arrow::field("entry_point", arrow::int64()),
+                       arrow::field("entry_name", arrow::utf8()),
                        arrow::field("message_size", arrow::int64()),
                        arrow::field("cpu_begin", arrow::int64()),
                        arrow::field("cpu_end", arrow::int64()),
@@ -166,8 +176,9 @@ void write_timeline(const Timeline &timeline) {
         schema, static_cast<int64_t>(timeline.events.size()),
         {log_id_array, event_index_array, begin_time_array, end_time_array,
          recv_time_array, event_id_array, pe_array, entry_point_array,
-         message_size_array, cpu_begin_array, cpu_end_array, mtype_array,
-         user_event_name_array, message_count_array, pack_time_count_array});
+         entry_name_array, message_size_array, cpu_begin_array, cpu_end_array,
+         mtype_array, user_event_name_array, message_count_array,
+         pack_time_count_array});
 
     // Create table
     const auto &table_result = arrow::Table::FromRecordBatches({record_batch});

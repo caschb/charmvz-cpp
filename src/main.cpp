@@ -36,7 +36,7 @@ auto main(int argc, char **argv) -> int {
   spdlog::debug("Total logs: {}", traces_paths.size());
 
   auto sts_data = charmvz::read_sts_file(sts_file_path);
-  auto timelines = charmvz::read_log_files(traces_paths);
+  auto timelines = charmvz::read_log_files(traces_paths, sts_data);
   for (auto &timeline : timelines) {
     charmvz::write_timeline(timeline);
   }
