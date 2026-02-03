@@ -1,7 +1,7 @@
 project(
-  'CharmVZ',
-  'cpp',
-  default_options: ['warning_level=3', 'cpp_std=c++20'],
+    'CharmVZ',
+    'cpp',
+    default_options: ['warning_level=3', 'cpp_std=c++20'],
 )
 
 deps = []
@@ -27,48 +27,48 @@ deps += [arrow_dep, parquet_dep]
 
 # add Catch2 as a dependency
 test_deps = deps + dependency(
-  'Catch2',
-  method: 'cmake',
-  version: '>=3.10.0',
-  modules: ['Catch2::Catch2WithMain'],
-  required: false,
+    'Catch2',
+    method: 'cmake',
+    version: '>=3.10.0',
+    modules: ['Catch2::Catch2WithMain'],
+    required: false,
 )
 
 charmvz_lib = library(
-  'charmvz_lib',
-  [
-    'src/reader/reader.cpp',
-    'src/writer/writer.cpp',
-    'src/timeline/timeline.cpp',
-    'src/utils/log_entry.cpp',
-    'src/utils/log_reader.cpp',
-  ],
-  include_directories: include_directories('src/include/'),
-  dependencies: deps,
-  install: true,
+    'charmvz_lib',
+    [
+        'src/reader/reader.cpp',
+        'src/writer/writer.cpp',
+        'src/timeline/timeline.cpp',
+        'src/utils/log_entry.cpp',
+        'src/utils/log_reader.cpp',
+    ],
+    include_directories: include_directories('src/include/'),
+    dependencies: deps,
+    install: true,
 )
 
 executable(
-  'charmvz',
-  'src/main.cpp',
-  link_with: charmvz_lib,
-  include_directories: include_directories('src/include/'),
-  dependencies: deps,
+    'charmvz',
+    'src/main.cpp',
+    link_with: charmvz_lib,
+    include_directories: include_directories('src/include/'),
+    dependencies: deps,
 )
 
 test(
-  'reader tests',
-  executable(
-    'test_reader',
-    [
-      'tests/test_reader.cpp',
-      'src/reader/reader.cpp',
-      'src/timeline/timeline.cpp',
-      'src/utils/log_entry.cpp',
-      'src/utils/log_reader.cpp',
-    ],
-    dependencies: test_deps,
-    link_with: charmvz_lib,
-    include_directories: include_directories('src/include/'),
-  ),
+    'reader tests',
+    executable(
+        'test_reader',
+        [
+            'tests/test_reader.cpp',
+            'src/reader/reader.cpp',
+            'src/timeline/timeline.cpp',
+            'src/utils/log_entry.cpp',
+            'src/utils/log_reader.cpp',
+        ],
+        dependencies: test_deps,
+        link_with: charmvz_lib,
+        include_directories: include_directories('src/include/'),
+    ),
 )
