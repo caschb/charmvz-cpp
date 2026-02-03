@@ -2,6 +2,9 @@ project(
     'CharmVZ',
     'cpp',
     default_options: ['warning_level=3', 'cpp_std=c++20'],
+    license: 'MIT',
+    license_files: 'LICENSE',
+    version: '0.1.0',
 )
 
 deps = []
