@@ -1,67 +1,68 @@
-/**
- * @file log_entry.h
- * @brief Definitions for Charm++ log entry types and structures
- */
+#pragma once
 
-#ifndef LOG_ENTRY_H
-#define LOG_ENTRY_H
 #include "spdlog/spdlog.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 
-/// Special entry point ID indicating idle time
-constexpr int64_t IDLE_ENTRY = -1;
+constexpr int32_t IDLE_ENTRY = -1;
+constexpr size_t NUMPAPIEVENTS = 6;
 
-/**
- * @enum LogType
- * @brief Enumeration of Charm++ log entry types
- */
 enum class LogType {
-  UNKNOWN = -1,          ///< Unknown or unrecognized log type
-  CREATION = 1,          ///< Object creation event
-  BEGIN_PROCESSING = 2,  ///< Start of message processing
-  END_PROCESSING = 3,    ///< End of message processing
-  BEGIN_COMPUTATION = 6, ///< Start of computation
-  END_COMPUTATION = 7,   ///< End of computation
-  USER_EVENT = 13,       ///< User-defined event
-  BEGIN_IDLE = 14,       ///< Start of idle time
-  END_IDLE = 15,         ///< End of idle time
-  BEGIN_PACK = 16,       ///< Start of message packing
-  END_PACK = 17,         ///< End of message packing
-  BEGIN_UNPACK = 18,     ///< Start of message unpacking
-  END_UNPACK = 19,       ///< End of message unpacking
-  CREATION_BCAST = 20,   ///< Broadcast creation event
-  END_PHASE = 30,        ///< End of a computation phase
-  USER_EVENT_PAIR = 100, ///< Paired user-defined event
+  UNKNOWN = -1,
+  CREATION = 1,
+  BEGIN_PROCESSING = 2,
+  END_PROCESSING = 3,
+  ENQUEUE = 4,
+  DEQUEUE = 5,
+  BEGIN_COMPUTATION = 6,
+  END_COMPUTATION = 7,
+  BEGIN_INTERRUPT = 8,
+  END_INTERRUPT = 9,
+  MESSAGE_RECV = 10,
+  BEGIN_TRACE = 11,
+  END_TRACE = 12,
+  USER_EVENT = 13,
+  BEGIN_IDLE = 14,
+  END_IDLE = 15,
+  BEGIN_PACK = 16,
+  END_PACK = 17,
+  BEGIN_UNPACK = 18,
+  END_UNPACK = 19,
+  CREATION_BCAST = 20,
+  CREATION_MULTICAST = 21,
+  MEMORY_MALLOC = 24,
+  MEMORY_FREE = 25,
+  USER_SUPPLIED = 26,
+  MEMORY_USAGE_CURRENT = 27,
+  USER_SUPPLIED_NOTE = 28,
+  USER_SUPPLIED_BRACKETED_NOTE = 29,
+  END_PHASE = 30,
+  SURROGATE_BLOCK = 31,
+  USER_STAT = 32,
+  BEGIN_USER_EVENT_PAIR = 98,
+  END_USER_EVENT_PAIR = 99,
+  USER_EVENT_PAIR = 100,
 };
 
-/**
- * @struct LogEntry
- * @brief Represents a single entry from a Charm++ log file
- */
 struct LogEntry {
-  LogType type;        ///< Type of log entry
-  int64_t mtype;       ///< Message type ID
-  int64_t timestamp;   ///< Timestamp of the event
-  int64_t entry_point; ///< Entry method ID
-  int64_t event;       ///< Event ID
-  int64_t pe;          ///< Processing element (PE) ID
-  int64_t num_pes;     ///< Number of PEs involved (for broadcasts)
-  int64_t send_time;   ///< Send time for messages
-  int64_t recv_time;   ///< Receive time for messages
-  bool open;           ///< Whether this is an opening event
+  LogType type;
+  uint16_t mIdx;
+  uint16_t eIdx;
+  uint64_t itime;
+  int32_t event;
+  int32_t pe;
+  int32_t msglen;
+  uint64_t irecvtime;
+  uint64_t icputime;
+  int32_t id[4];
+  uint64_t papiValues[NUMPAPIEVENTS];
+  int32_t numpes;
+  std::vector<int32_t> pes;
 };
 
-/**
- * @brief Convert a LogType to its string representation
- * @param type The LogType to convert
- * @return String representation of the log type
- */
 auto to_string(const LogType &type) -> const char *;
 
-/**
- * @brief Formatter specialization for LogEntry to enable formatted output
- */
 template <> struct spdlog::fmt_lib::formatter<LogEntry> {
   constexpr auto parse(spdlog::fmt_lib::format_parse_context &ctx) {
     return ctx.begin();
@@ -71,10 +72,8 @@ template <> struct spdlog::fmt_lib::formatter<LogEntry> {
               spdlog::fmt_lib::format_context &ctx) const {
     return spdlog::fmt_lib::format_to(
         ctx.out(),
-        "LogEntry{{type: {}, mtype: {}, timestamp: {}, "
-        "entry: {}, event: {}, pe: {}}}",
-        to_string(entry.type), entry.mtype, entry.timestamp, entry.entry_point,
+        "LogEntry{{type: {}, mIdx: {}, itime: {}, eIdx: {}, event: {}, pe: {}}}",
+        to_string(entry.type), entry.mIdx, entry.itime, entry.eIdx,
         entry.event, entry.pe);
   }
 };
-#endif
