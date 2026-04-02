@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 #include <arrow/builder.h>
 #include <filesystem>
+#include <limits>
 #include <regex>
 #include <sstream>
 
@@ -19,12 +20,13 @@ auto process_logs(
     const std::string& output_dir
 ) -> LogParserResult {
     LogParserResult result;
-    
-    charmvz::ParquetWriter exec_writer(charmvz::schema::execution(), output_dir + "/execution.parquet");
+
+    auto exec_schema = charmvz::schema::execution(sts_data.papi_event_names);
+    charmvz::ParquetWriter exec_writer(exec_schema, output_dir + "/execution.parquet");
     charmvz::ParquetWriter idle_writer(charmvz::schema::idle_interval(), output_dir + "/idle_interval.parquet");
     charmvz::ParquetWriter chare_writer(charmvz::schema::chare_instance(), output_dir + "/chare_instance.parquet");
-    
-    builders::ExecutionBuilder exec_builder(exec_writer);
+
+    builders::ExecutionBuilder exec_builder(exec_writer, exec_schema, sts_data.total_papi_events);
     builders::IdleIntervalBuilder idle_builder(idle_writer);
     builders::ChareInstanceBuilder chare_builder(chare_writer);
     
@@ -44,9 +46,9 @@ auto process_logs(
         std::getline(log_stream, line);
         
         LogEntry last_begin_idle{};
-        LogEntry last_begin_processing{};
         int64_t last_pack_start = 0;
         int64_t last_unpack_start = 0;
+        std::unordered_map<int32_t, LogEntry> open_processing_entries;
 
         while (std::getline(log_stream, line)) {
             if (line.empty()) continue;
@@ -88,7 +90,14 @@ auto process_logs(
                     iss >> e.mIdx >> e.eIdx >> e.itime >> e.event >> e.pe >> e.msglen >> e.irecvtime;
                     iss >> e.id[0] >> e.id[1] >> e.id[2] >> e.id[3];
                     iss >> e.icputime;
-                    last_begin_processing = e;
+                    for (int32_t i = 0; i < sts_data.total_papi_events; ++i) {
+                        uint64_t papi_value = 0;
+                        iss >> papi_value;
+                        if (i < static_cast<int32_t>(NUMPAPIEVENTS)) {
+                            e.papiValues[i] = papi_value;
+                        }
+                    }
+                    open_processing_entries[e.event] = e;
                     
                     BeginProcessingRecord bp;
                     bp.dst_pe = current_pe_id;
@@ -116,17 +125,32 @@ auto process_logs(
                 }
                 case LogType::END_PROCESSING: {
                     iss >> e.mIdx >> e.eIdx >> e.itime >> e.event >> e.pe >> e.msglen >> e.icputime;
-                    
+                    for (int32_t i = 0; i < sts_data.total_papi_events; ++i) {
+                        uint64_t papi_value = 0;
+                        iss >> papi_value;
+                        if (i < static_cast<int32_t>(NUMPAPIEVENTS)) {
+                            e.papiValues[i] = papi_value;
+                        }
+                    }
+
+                    auto begin_it = open_processing_entries.find(e.event);
+                    if (begin_it == open_processing_entries.end()) {
+                        spdlog::warn("Missing BEGIN_PROCESSING for event {} on PE {}", e.event, current_pe_id);
+                        break;
+                    }
+
+                    const LogEntry& begin = begin_it->second;
                     int32_t cid = 0;
-                    auto ep_it = sts_data.ep_map.find(last_begin_processing.eIdx);
+                    auto ep_it = sts_data.ep_map.find(begin.eIdx);
                     if (ep_it != sts_data.ep_map.end()) cid = ep_it->second.collection_id;
 
-                    auto chare_tup = std::make_tuple(cid, last_begin_processing.id[0], last_begin_processing.id[1], last_begin_processing.id[2], last_begin_processing.id[3]);
+                    auto chare_tup = std::make_tuple(cid, begin.id[0], begin.id[1], begin.id[2], begin.id[3]);
                     int64_t inst_id = -1;
                     auto inst_it = result.chare_instances.find(chare_tup);
                     if (inst_it != result.chare_instances.end()) inst_id = inst_it->second.instance_id;
 
-                    exec_builder.Append(last_begin_processing, rc_data.global_start_time_us, inst_id, last_begin_processing.irecvtime);
+                    exec_builder.Append(begin, e, current_pe_id, rc_data.global_start_time_us, inst_id);
+                    open_processing_entries.erase(begin_it);
                     break;
                 }
                 case LogType::BEGIN_IDLE: {

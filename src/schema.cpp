@@ -42,8 +42,8 @@ auto chare_instance() -> std::shared_ptr<arrow::Schema> {
   });
 }
 
-auto execution() -> std::shared_ptr<arrow::Schema> {
-  return arrow::schema({
+auto execution(const std::vector<std::string>& papi_event_names) -> std::shared_ptr<arrow::Schema> {
+  auto schema = arrow::schema({
       arrow::field("pe_id", arrow::int32(), false),
       arrow::field("event", arrow::int32(), false),
       arrow::field("instance_id", arrow::int64(), true),
@@ -78,6 +78,28 @@ auto execution() -> std::shared_ptr<arrow::Schema> {
       arrow::field("papi_delta_4", arrow::int64(), true),
       arrow::field("papi_delta_5", arrow::int64(), true)
   });
+
+  if (papi_event_names.empty()) {
+    return schema;
+  }
+
+  std::vector<std::string> keys;
+  std::vector<std::string> values;
+  keys.reserve(papi_event_names.size());
+  values.reserve(papi_event_names.size());
+  for (size_t i = 0; i < papi_event_names.size(); ++i) {
+    if (papi_event_names[i].empty()) {
+      continue;
+    }
+    keys.push_back("papi_event_" + std::to_string(i));
+    values.push_back(papi_event_names[i]);
+  }
+
+  if (keys.empty()) {
+    return schema;
+  }
+
+  return schema->WithMetadata(std::make_shared<arrow::KeyValueMetadata>(keys, values));
 }
 
 auto message() -> std::shared_ptr<arrow::Schema> {

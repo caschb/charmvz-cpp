@@ -1,55 +1,68 @@
 #include "builders.h"
 #include "schema.h"
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <limits>
 
 namespace charmvz::builders {
 
-ExecutionBuilder::ExecutionBuilder(ParquetWriter& writer) 
-    : writer_(writer), schema_(charmvz::schema::execution()) {}
+ExecutionBuilder::ExecutionBuilder(ParquetWriter& writer, std::shared_ptr<arrow::Schema> schema, int32_t total_papi_events)
+    : writer_(writer), schema_(std::move(schema)), total_papi_events_(std::clamp(total_papi_events, 0, static_cast<int32_t>(NUMPAPIEVENTS))) {}
 
-void ExecutionBuilder::Append(const LogEntry& entry, int64_t global_start_us, int64_t inst_id, int64_t q_wait_us) {
-    PARQUET_THROW_NOT_OK(pe_id.Append(entry.pe));
-    PARQUET_THROW_NOT_OK(event.Append(entry.event));
+void ExecutionBuilder::Append(const LogEntry& begin, const LogEntry& end, int32_t execution_pe_id, int64_t global_start_us, int64_t inst_id) {
+    PARQUET_THROW_NOT_OK(pe_id.Append(execution_pe_id));
+    PARQUET_THROW_NOT_OK(event.Append(begin.event));
     if (inst_id >= 0) {
         PARQUET_THROW_NOT_OK(instance_id.Append(inst_id));
     } else {
         PARQUET_THROW_NOT_OK(instance_id.AppendNull());
     }
-    PARQUET_THROW_NOT_OK(ep_id.Append(entry.eIdx));
-    // src_pe will be appended correctly via Message reconstruction, but Execution also uses log properties
-    // In Charm++, we just put log data or default -1
-    PARQUET_THROW_NOT_OK(src_pe.Append(-1));
-    PARQUET_THROW_NOT_OK(msg_idx.Append(entry.mIdx));
-    PARQUET_THROW_NOT_OK(msg_len.Append(entry.msglen));
-    
-    int64_t aligned_start = entry.itime - global_start_us;
+    PARQUET_THROW_NOT_OK(ep_id.Append(begin.eIdx));
+    PARQUET_THROW_NOT_OK(src_pe.Append(begin.pe));
+    PARQUET_THROW_NOT_OK(msg_idx.Append(begin.mIdx));
+    PARQUET_THROW_NOT_OK(msg_len.Append(begin.msglen));
+
+    int64_t aligned_start = static_cast<int64_t>(begin.itime) - global_start_us;
+    int64_t aligned_end = static_cast<int64_t>(end.itime) - global_start_us;
     PARQUET_THROW_NOT_OK(start_time_us.Append(aligned_start));
-    PARQUET_THROW_NOT_OK(recv_time_us.AppendNull());
-    PARQUET_THROW_NOT_OK(start_cpu_us.Append(entry.icputime));
-    
-    PARQUET_THROW_NOT_OK(end_time_us.AppendNull());
-    PARQUET_THROW_NOT_OK(end_cpu_us.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_begin_0.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_begin_1.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_begin_2.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_begin_3.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_begin_4.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_begin_5.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_end_0.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_end_1.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_end_2.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_end_3.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_end_4.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_end_5.AppendNull());
-    PARQUET_THROW_NOT_OK(wall_duration_us.AppendNull());
-    PARQUET_THROW_NOT_OK(cpu_duration_us.AppendNull());
-    PARQUET_THROW_NOT_OK(queue_wait_us.Append(q_wait_us));
-    PARQUET_THROW_NOT_OK(papi_delta_0.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_delta_1.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_delta_2.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_delta_3.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_delta_4.AppendNull());
-    PARQUET_THROW_NOT_OK(papi_delta_5.AppendNull());
+    if (begin.irecvtime == std::numeric_limits<uint64_t>::max()) {
+        PARQUET_THROW_NOT_OK(recv_time_us.AppendNull());
+    } else {
+        PARQUET_THROW_NOT_OK(recv_time_us.Append(static_cast<int64_t>(begin.irecvtime) - global_start_us));
+    }
+    PARQUET_THROW_NOT_OK(start_cpu_us.Append(begin.icputime));
+
+    PARQUET_THROW_NOT_OK(end_time_us.Append(aligned_end));
+    PARQUET_THROW_NOT_OK(end_cpu_us.Append(end.icputime));
+
+    auto append_papi_triplet = [&](arrow::Int64Builder& begin_builder, arrow::Int64Builder& end_builder, arrow::Int64Builder& delta_builder, size_t index) {
+        if (static_cast<int32_t>(index) < total_papi_events_) {
+            const int64_t begin_value = static_cast<int64_t>(begin.papiValues[index]);
+            const int64_t end_value = static_cast<int64_t>(end.papiValues[index]);
+            PARQUET_THROW_NOT_OK(begin_builder.Append(begin_value));
+            PARQUET_THROW_NOT_OK(end_builder.Append(end_value));
+            PARQUET_THROW_NOT_OK(delta_builder.Append(end_value - begin_value));
+        } else {
+            PARQUET_THROW_NOT_OK(begin_builder.AppendNull());
+            PARQUET_THROW_NOT_OK(end_builder.AppendNull());
+            PARQUET_THROW_NOT_OK(delta_builder.AppendNull());
+        }
+    };
+
+    append_papi_triplet(papi_begin_0, papi_end_0, papi_delta_0, 0);
+    append_papi_triplet(papi_begin_1, papi_end_1, papi_delta_1, 1);
+    append_papi_triplet(papi_begin_2, papi_end_2, papi_delta_2, 2);
+    append_papi_triplet(papi_begin_3, papi_end_3, papi_delta_3, 3);
+    append_papi_triplet(papi_begin_4, papi_end_4, papi_delta_4, 4);
+    append_papi_triplet(papi_begin_5, papi_end_5, papi_delta_5, 5);
+
+    PARQUET_THROW_NOT_OK(wall_duration_us.Append(static_cast<int64_t>(end.itime) - static_cast<int64_t>(begin.itime)));
+    PARQUET_THROW_NOT_OK(cpu_duration_us.Append(static_cast<int64_t>(end.icputime) - static_cast<int64_t>(begin.icputime)));
+    if (begin.irecvtime == std::numeric_limits<uint64_t>::max()) {
+        PARQUET_THROW_NOT_OK(queue_wait_us.AppendNull());
+    } else {
+        PARQUET_THROW_NOT_OK(queue_wait_us.Append(static_cast<int64_t>(begin.itime) - static_cast<int64_t>(begin.irecvtime)));
+    }
 
     TryFlush();
 }
