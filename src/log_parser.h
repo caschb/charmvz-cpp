@@ -67,12 +67,19 @@ struct ChareInstanceRecord {
     int32_t index_3;
 };
 
+struct BeginProcessingRecord {
+    int32_t dst_pe;
+    int64_t recv_time_us;
+    int64_t exec_start_time_us;
+};
+
 struct LogParserResult {
     std::unordered_map<std::tuple<int32_t, int32_t>, CreationRecord, TupleHash> creation_map;
     std::vector<MigrationPack> packs;
     std::vector<MigrationUnpack> unpacks;
     std::vector<ProcessingElementRecord> pes;
     std::unordered_map<std::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, ChareInstanceRecord, TupleHash> chare_instances;
+    std::unordered_map<std::tuple<int32_t, int32_t>, BeginProcessingRecord, TupleHash> begin_processing_map;
 };
 
 auto process_logs(

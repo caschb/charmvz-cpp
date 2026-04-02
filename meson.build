@@ -45,6 +45,7 @@ charmvz_lib = library(
         'src/log_parser.cpp',
         'src/reconstruction.cpp',
         'src/parquet_writer.cpp',
+        'src/builders.cpp',
         'src/schema.cpp',
         'src/utils/log_entry.cpp',
     ],

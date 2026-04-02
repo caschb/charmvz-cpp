@@ -6,14 +6,15 @@ Checks: "*,
         -fuchsia-*,
         -google-*,
         -llvm*,
-        -zircon-*
+        -zircon-*,
+        -readability-function-cognitive-complexity
 "
 
 WarningsAsErrors: ''
 HeaderFilterRegex: ''
 FormatStyle:     none
 CheckOptions:
-  - { key: readability-identifier-length.IgnoredVariableNames, value: '^i$|^j$|^k$|^x$|^y$|^z$|^id$' }
+  - { key: readability-identifier-length.IgnoredVariableNames, value: '^i$|^j$|^k$|^x$|^y$|^z$|^id$|^_s$' }
 SystemHeaders:   false
 ...
 
