@@ -1,0 +1,197 @@
+"""Derived table computations that bridge entity tables to visualization needs.
+
+The C++ pipeline writes normalized entity tables (Execution, Message, etc.).
+Many visualizations expect a denormalized ``entry_spans`` table with EP names
+joined in, durations pre-computed, etc.  This module produces those derived
+tables as Polars LazyFrames so that predicate pushdown still applies.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Sequence
+
+import polars as pl
+
+from .filters import apply_filters
+
+if TYPE_CHECKING:
+    from .dataset import TraceDataset
+
+
+def compute_entry_spans(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Build the ``entry_spans`` derived table.
+
+    This is the most-used derived table.  It joins Execution with EntryMethod
+    (for EP and chare names) and applies PE / time-range filters.
+
+    Returns
+    -------
+    LazyFrame with columns:
+        pe_id, event, ep_id, ep_name, collection_id, chare_name,
+        start_time_us, end_time_us, wall_duration_us,
+        cpu_duration_us, queue_wait_us,
+        src_pe, msg_len, recv_time_us, instance_id,
+        papi_delta_0..5
+    """
+    exec_lf = apply_filters(
+        ds.execution,
+        pes=pes,
+        time_range=time_range,
+        pe_col="pe_id",
+        start_col="start_time_us",
+        end_col="end_time_us",
+    )
+
+    # Join with entry_method for EP name and chare info
+    em_lf = ds.entry_method.select(
+        "ep_id",
+        pl.col("name").alias("ep_name"),
+        "collection_id",
+    )
+
+    # Join with chare_collection for chare name
+    cc_lf = ds.chare_collection.select(
+        "collection_id",
+        pl.col("name").alias("chare_name"),
+    )
+
+    spans = (
+        exec_lf
+        .join(em_lf, on="ep_id", how="left")
+        .join(cc_lf, on="collection_id", how="left")
+    )
+
+    return spans
+
+
+def compute_idle_spans(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Filtered idle interval spans."""
+    return apply_filters(
+        ds.idle_interval,
+        pes=pes,
+        time_range=time_range,
+        pe_col="pe_id",
+        start_col="start_time_us",
+        end_col="end_time_us",
+    )
+
+
+def compute_message_spans(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Filtered message spans with target EP name joined.
+
+    Parameters
+    ----------
+    pes : filter on **source** PE (``src_pe`` column).
+    time_range : filter on ``send_time_us``.
+    """
+    msg_lf = apply_filters(
+        ds.message,
+        pes=pes,
+        time_range=time_range,
+        pe_col="src_pe",
+        start_col="send_time_us",
+        end_col=None,  # point event — no end column
+    )
+
+    em_lf = ds.entry_method.select(
+        "ep_id",
+        pl.col("name").alias("target_ep_name"),
+    )
+
+    return msg_lf.join(em_lf, on="ep_id", how="left")
+
+
+def bin_spans(
+    spans: pl.LazyFrame,
+    bin_width_us: int,
+    time_range: tuple[int, int],
+    start_col: str = "start_time_us",
+    end_col: str = "end_time_us",
+    duration_col: str = "wall_duration_us",
+) -> pl.LazyFrame:
+    """Assign spans to time bins, clipping at bin boundaries.
+
+    For each span, computes the contribution (in µs) to every bin it overlaps.
+    This is the core helper for Time Profile, Overview, and similar binned
+    visualizations.
+
+    Returns
+    -------
+    LazyFrame with all original columns plus:
+        ``bin_start`` (int64): start of the bin
+        ``bin_contribution_us`` (int64): µs of the span falling in this bin
+    """
+    t_start, t_end = time_range
+
+    # Clip span boundaries to the global window
+    result = spans.with_columns(
+        pl.max_horizontal(pl.col(start_col), pl.lit(t_start)).alias("_clipped_start"),
+        pl.min_horizontal(
+            pl.col(end_col).fill_null(pl.lit(t_end)),
+            pl.lit(t_end),
+        ).alias("_clipped_end"),
+    )
+
+    # Compute which bins the span touches
+    result = result.with_columns(
+        (
+            (pl.col("_clipped_start") - t_start) // bin_width_us
+        ).alias("_first_bin_idx"),
+        (
+            (pl.col("_clipped_end") - t_start - 1).clip(lower_bound=0) // bin_width_us
+        ).alias("_last_bin_idx"),
+    )
+
+    # For spans that fit within a single bin, emit directly
+    single_bin = result.filter(pl.col("_first_bin_idx") == pl.col("_last_bin_idx"))
+    single_bin = single_bin.with_columns(
+        (pl.col("_first_bin_idx") * bin_width_us + t_start).alias("bin_start"),
+        (pl.col("_clipped_end") - pl.col("_clipped_start")).alias("bin_contribution_us"),
+    )
+
+    # For multi-bin spans, explode into per-bin rows
+    multi_bin = result.filter(pl.col("_first_bin_idx") < pl.col("_last_bin_idx"))
+
+    # Generate bin indices via int_ranges
+    multi_bin = multi_bin.with_columns(
+        pl.int_ranges(pl.col("_first_bin_idx"), pl.col("_last_bin_idx") + 1).alias(
+            "_bin_indices"
+        ),
+    ).explode("_bin_indices")
+
+    multi_bin = multi_bin.with_columns(
+        (pl.col("_bin_indices") * bin_width_us + t_start).alias("bin_start"),
+    )
+
+    # Compute per-bin contribution: clip span to bin boundaries
+    multi_bin = multi_bin.with_columns(
+        (
+            pl.min_horizontal(
+                pl.col("_clipped_end"),
+                pl.col("bin_start") + bin_width_us,
+            )
+            - pl.max_horizontal(
+                pl.col("_clipped_start"),
+                pl.col("bin_start"),
+            )
+        )
+        .clip(lower_bound=0)
+        .alias("bin_contribution_us"),
+    )
+
+    # Union and drop temporaries
+    combined = pl.concat([single_bin, multi_bin], how="diagonal_relaxed")
+    drop_cols = [c for c in combined.collect_schema().names() if c.startswith("_")]
+    return combined.drop(drop_cols)
