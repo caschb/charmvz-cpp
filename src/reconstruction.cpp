@@ -4,6 +4,8 @@
 #include <arrow/builder.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <limits>
+#include <map>
 
 namespace charmvz {
 
@@ -119,9 +121,77 @@ void reconstruct_message_and_migration(
     }
     flush_msg();
     
-    // Migrations MVP
+    // Migrations MVP (Rule 9 Episode Correlation)
     ParquetWriter mig_writer(charmvz::schema::migration_episode(), output_dir + "/migration_episode.parquet");
     spdlog::info("Writing MigrationEpisode.parquet");
+
+    arrow::Int64Builder mig_id, p_start, p_end, u_start, u_end, inst, p_dur, u_dur, tot_mig, net_trans;
+    arrow::Int32Builder mig_src, mig_dst;
+    arrow::BooleanBuilder ambig;
+
+    auto packs = log_data.packs;
+
+    std::sort(packs.begin(), packs.end(), [](const MigrationPack& a, const MigrationPack& b) {
+        return a.pack_start_us < b.pack_start_us;
+    });
+
+    std::multimap<int64_t, MigrationUnpack> available_unpacks;
+    for (const auto& u : log_data.unpacks) {
+        available_unpacks.insert({u.unpack_start_us, u});
+    }
+
+    int64_t migration_id = 0;
+
+    for (const auto& pack : packs) {
+        migration_id++;
+        PARQUET_THROW_NOT_OK(mig_id.Append(migration_id));
+        PARQUET_THROW_NOT_OK(mig_src.Append(pack.src_pe));
+        PARQUET_THROW_NOT_OK(p_start.Append(pack.pack_start_us - rc_data.global_start_time_us));
+        PARQUET_THROW_NOT_OK(p_end.Append(pack.pack_end_us - rc_data.global_start_time_us));
+        
+        auto up_it = available_unpacks.lower_bound(pack.pack_end_us);
+        
+        if (up_it != available_unpacks.end()) {
+            const auto& up_ack = up_it->second;
+            PARQUET_THROW_NOT_OK(mig_dst.Append(up_ack.dst_pe));
+            PARQUET_THROW_NOT_OK(u_start.Append(up_ack.unpack_start_us - rc_data.global_start_time_us));
+            PARQUET_THROW_NOT_OK(u_end.Append(up_ack.unpack_end_us - rc_data.global_start_time_us));
+            PARQUET_THROW_NOT_OK(u_dur.Append(up_ack.unpack_end_us - up_ack.unpack_start_us));
+            PARQUET_THROW_NOT_OK(net_trans.Append(up_ack.unpack_start_us - pack.pack_end_us));
+            PARQUET_THROW_NOT_OK(tot_mig.Append(up_ack.unpack_end_us - pack.pack_start_us));
+            
+            available_unpacks.erase(up_it);
+        } else {
+            PARQUET_THROW_NOT_OK(mig_dst.AppendNull());
+            PARQUET_THROW_NOT_OK(u_start.AppendNull());
+            PARQUET_THROW_NOT_OK(u_end.AppendNull());
+            PARQUET_THROW_NOT_OK(u_dur.AppendNull());
+            PARQUET_THROW_NOT_OK(net_trans.AppendNull());
+            PARQUET_THROW_NOT_OK(tot_mig.AppendNull());
+        }
+        PARQUET_THROW_NOT_OK(p_dur.Append(pack.pack_end_us - pack.pack_start_us));
+        PARQUET_THROW_NOT_OK(inst.AppendNull()); // Inference optional
+        PARQUET_THROW_NOT_OK(ambig.Append(true)); // Marked ambiguous since we infer purely by time proximity
+    }
+
+    if (mig_id.length() > 0) {
+        std::vector<std::shared_ptr<arrow::Array>> arrays(13);
+        PARQUET_THROW_NOT_OK(mig_id.Finish(&arrays[0]));
+        PARQUET_THROW_NOT_OK(mig_src.Finish(&arrays[1]));
+        PARQUET_THROW_NOT_OK(p_start.Finish(&arrays[2]));
+        PARQUET_THROW_NOT_OK(p_end.Finish(&arrays[3]));
+        PARQUET_THROW_NOT_OK(mig_dst.Finish(&arrays[4]));
+        PARQUET_THROW_NOT_OK(u_start.Finish(&arrays[5]));
+        PARQUET_THROW_NOT_OK(u_end.Finish(&arrays[6]));
+        PARQUET_THROW_NOT_OK(inst.Finish(&arrays[7]));
+        PARQUET_THROW_NOT_OK(ambig.Finish(&arrays[8]));
+        PARQUET_THROW_NOT_OK(p_dur.Finish(&arrays[9]));
+        PARQUET_THROW_NOT_OK(u_dur.Finish(&arrays[10]));
+        PARQUET_THROW_NOT_OK(tot_mig.Finish(&arrays[11]));
+        PARQUET_THROW_NOT_OK(net_trans.Finish(&arrays[12]));
+        auto batch = arrow::RecordBatch::Make(charmvz::schema::migration_episode(), arrays[0]->length(), arrays);
+        mig_writer.WriteBatch(batch);
+    }
 }
 
 } // namespace charmvz
