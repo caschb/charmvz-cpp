@@ -30,7 +30,8 @@ auto chare_instance() -> std::shared_ptr<arrow::Schema>;
 /**
  * Returns the formal Arrow schema for the Execution entity.
  */
-auto execution(const std::vector<std::string>& papi_event_names = {}) -> std::shared_ptr<arrow::Schema>;
+auto execution(const std::vector<std::string> &papi_event_names = {})
+    -> std::shared_ptr<arrow::Schema>;
 
 /**
  * Returns the formal Arrow schema for the Message entity.

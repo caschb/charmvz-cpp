@@ -1,6 +1,6 @@
 #include "sts_parser.h"
-#include <spdlog/spdlog.h>
 #include <fstream>
+#include <spdlog/spdlog.h>
 #include <sstream>
 #include <stdexcept>
 
@@ -13,14 +13,15 @@ auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
     spdlog::error("Cannot open STS file: {}", sts_file_path);
     return data;
   }
-  
+
   std::string line;
   while (std::getline(f, line)) {
-    if (line.empty()) continue;
+    if (line.empty())
+      continue;
     std::istringstream iss(line);
     std::string token;
     iss >> token;
-    
+
     if (token == "VERSION") {
       iss >> std::ws;
       if (iss.peek() == '"') {
@@ -30,7 +31,8 @@ auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
         iss >> data.version;
       }
       if (data.version != "11.0") {
-        spdlog::error("Unsupported STS VERSION '{}'. Only 11.0 is supported.", data.version);
+        spdlog::error("Unsupported STS VERSION '{}'. Only 11.0 is supported.",
+                      data.version);
         throw std::runtime_error("Unsupported STS VERSION");
       }
     } else if (token == "TOTAL_PHASES") {

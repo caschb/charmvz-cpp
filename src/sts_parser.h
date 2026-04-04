@@ -1,9 +1,9 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <string_view>
-#include <vector>
 #include <unordered_map>
-#include <cstdint>
+#include <vector>
 
 namespace charmvz {
 
@@ -34,7 +34,7 @@ struct StsData {
   std::vector<ChareCollectionRecord> chares;
   std::vector<EntryMethodRecord> entries;
   std::vector<MessageTypeRecord> messages;
-  
+
   std::unordered_map<int32_t, ChareCollectionRecord> chare_map;
   std::unordered_map<int32_t, EntryMethodRecord> ep_map;
   std::unordered_map<int32_t, MessageTypeRecord> message_map;

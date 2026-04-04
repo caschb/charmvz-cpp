@@ -70,10 +70,11 @@ template <> struct spdlog::fmt_lib::formatter<LogEntry> {
 
   auto format(const LogEntry &entry,
               spdlog::fmt_lib::format_context &ctx) const {
-    return spdlog::fmt_lib::format_to(
-        ctx.out(),
-        "LogEntry{{type: {}, mIdx: {}, itime: {}, eIdx: {}, event: {}, pe: {}}}",
-        to_string(entry.type), entry.mIdx, entry.itime, entry.eIdx,
-        entry.event, entry.pe);
+    return spdlog::fmt_lib::format_to(ctx.out(),
+                                      "LogEntry{{type: {}, mIdx: {}, itime: "
+                                      "{}, eIdx: {}, event: {}, pe: {}}}",
+                                      to_string(entry.type), entry.mIdx,
+                                      entry.itime, entry.eIdx, entry.event,
+                                      entry.pe);
   }
 };

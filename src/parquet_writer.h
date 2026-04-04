@@ -1,15 +1,16 @@
 #pragma once
 #include <arrow/api.h>
-#include <parquet/arrow/writer.h>
 #include <arrow/io/file.h>
 #include <memory>
+#include <parquet/arrow/writer.h>
 #include <string>
 
 namespace charmvz {
 
 class ParquetWriter {
 public:
-  ParquetWriter(std::shared_ptr<arrow::Schema> schema, const std::string& file_path);
+  ParquetWriter(std::shared_ptr<arrow::Schema> schema,
+                const std::string &file_path);
   ~ParquetWriter();
 
   void WriteBatch(std::shared_ptr<arrow::RecordBatch> batch);
