@@ -49,7 +49,6 @@ charmvz_lib = library(
         'src/schema.cpp',
         'src/utils/log_entry.cpp',
     ],
-    include_directories: include_directories('src/include/'),
     dependencies: deps,
     install: true,
 )
@@ -58,8 +57,5 @@ executable(
     'charmvz',
     'src/main.cpp',
     link_with: charmvz_lib,
-    include_directories: include_directories('src/include/'),
     dependencies: deps,
 )
-
-# tests temporarily disabled during pipeline rewrite
