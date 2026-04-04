@@ -1,0 +1,79 @@
+#+title: CharmVZ-vis
+#+author: Christian Asch
+#+email: casch@going-merry.local
+
+#+language: en
+#+select_tags: export
+#+exclude_tags: noexport
+#+creator: Emacs 30.2 (Org mode 9.7.11)
+
+* CharmVZ-vis
+Visualization and analysis library for [[https://github.com/caschb/charmvz-cpp][CharmVZ]] Parquet trace data.
+
+
+** Quick Start
+
+#+BEGIN_SRC python
+  import charmvz_vis as cv
+
+  # Load a trace dataset produced by the charmvz C++ pipeline
+  ds = cv.TraceDataset("./output/")
+  print(ds)  # TraceDataset('output', 64 PEs, 12.345s)
+
+  # Time Profile — stacked area of EP time usage over the run
+  fig = cv.time_profile(ds, bin_width_us=500_000)
+  fig.savefig("time_profile.png", dpi=150)
+
+  # Usage Profile — work distribution per PE
+  fig = cv.usage_profile(ds)
+
+  # Entry Method Profile — pie/donut chart
+  fig = cv.ep_profile(ds)
+
+  # Execution time histogram
+  fig = cv.execution_time_histogram(ds, n_bins=50)
+
+  # Communication per PE
+  fig = cv.comm_per_pe(ds, metric="sent_msgs")
+
+  # Find bottleneck PEs
+  fig = cv.extrema_analysis(ds, attribute="most_idle_time", k=5)
+#+END_SRC
+
+** Installation
+
+#+BEGIN_SRC bash
+  # From the charmvz-viz directory:
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -e ".[dev]"
+#+END_SRC
+
+** Available Visualizations
+
+| Function                   | Description                                 |
+|----------------------------+---------------------------------------------|
+| ~time_profile()~             | Stacked area chart of EP time vs. time bins |
+| ~usage_profile()~            | Stacked bar chart of EP time per PE         |
+| ~ep_profile()~               | Pie/donut chart of global EP time fractions |
+| ~execution_time_histogram()~ | Histogram of execution durations            |
+| ~message_size_histogram()~   | Histogram of message sizes                  |
+| ~comm_per_pe()~              | Bar chart of communication metrics per PE   |
+| ~extrema_analysis()~         | Outlier identification and ranking          |
+
+
+** Analysis Utilities
+
+#+BEGIN_SRC python :results both :exports both
+  # Per-PE utilization metrics
+  util_df = cv.per_pe_utilization(ds)
+
+  # Load imbalance score (coefficient of variation)
+  score = cv.load_imbalance_score(ds)
+#+END_SRC
+
+** Running Tests
+
+#+BEGIN_SRC bash
+  pytest
+#+END_SRC
