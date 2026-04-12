@@ -9,13 +9,13 @@ project(
 
 deps = []
 # add spdlog as a dependency
-deps += dependency('spdlog', version: '>=1.15.3', required: true)
+deps += dependency('spdlog', version: '>=1.15.3', required: true, include_type: 'system')
 
 # add CLI11 as a dependency
-deps += dependency('CLI11', version: '>=2.5.0', required: true)
+deps += dependency('CLI11', version: '>=2.5.0', required: true, include_type: 'system')
 
 # add zlib as a dependency
-z_dep = dependency('zlib', required: true)
+z_dep = dependency('zlib', required: true, include_type: 'system')
 deps += z_dep
 
 # add zstr as a CMake-based subproject
@@ -24,8 +24,8 @@ zstr_sub = cmake.subproject('zstr')
 deps += zstr_sub.dependency('zstr')
 
 # add Apache Arrow for parquet support
-arrow_dep = dependency('arrow', required: true)
-parquet_dep = dependency('parquet', required: true)
+arrow_dep = dependency('arrow', required: true, include_type: 'system')
+parquet_dep = dependency('parquet', required: true, include_type: 'system')
 deps += [arrow_dep, parquet_dep]
 
 # add Catch2 as a dependency
@@ -35,6 +35,7 @@ test_deps = deps + dependency(
     version: '>=3.10.0',
     modules: ['Catch2::Catch2WithMain'],
     required: false,
+    include_type: 'system',
 )
 
 charmvz_lib = library(
