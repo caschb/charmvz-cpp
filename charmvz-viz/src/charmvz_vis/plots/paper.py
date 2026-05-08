@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -20,6 +21,7 @@ from ..derived import (
     chare_duration_totals,
     chare_frequency_counts,
     chare_load_by_bin,
+    cumulative_percent_imbalance_by_time,
     percent_imbalance_by_bin,
 )
 
@@ -58,6 +60,58 @@ def _bin_starts(time_range: tuple[int, int], bin_width_us: int) -> np.ndarray:
     t_start, t_end = time_range
     n_bins = max(1, (t_end - t_start + bin_width_us - 1) // bin_width_us)
     return np.arange(t_start, t_start + n_bins * bin_width_us, bin_width_us)
+
+
+def _resolve_timeline_chares(
+    df: pl.DataFrame,
+    chare_order: Sequence[str] | None,
+    chares: Sequence[str] | None,
+    top_n_chares: int | None,
+) -> list[str]:
+    if top_n_chares is not None and top_n_chares <= 0:
+        raise ValueError("top_n_chares must be positive when provided")
+
+    if chare_order is not None:
+        resolved = list(chare_order)
+    elif chares is not None:
+        resolved = list(chares)
+    else:
+        totals = (
+            df.group_by("chare_name")
+            .agg(pl.col("load_us").sum().alias("total"))
+            .sort(["total", "chare_name"], descending=[True, False])
+        )
+        resolved = totals["chare_name"].to_list()
+
+    if top_n_chares is not None:
+        resolved = resolved[:top_n_chares]
+    return resolved
+
+
+def _add_timeline_legend(
+    ax: Axes,
+    colors: Mapping[str, str],
+    *,
+    include_idle: bool = True,
+) -> None:
+    handles = []
+    if include_idle:
+        handles.append(mpatches.Patch(facecolor=IDLE_COLOR, edgecolor="none", label="Idle"))
+    handles.extend(
+        mpatches.Patch(facecolor=color, edgecolor="none", label=chare_name)
+        for chare_name, color in colors.items()
+    )
+    if handles:
+        ax.legend(
+            handles=handles,
+            title="Chare",
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.15),
+            ncol=min(4, len(handles)),
+            frameon=False,
+            fontsize=8,
+            title_fontsize=9,
+        )
 
 
 def chare_duration_comparison(
@@ -194,6 +248,9 @@ def _draw_timeline_overview(
     pes: Sequence[int] | None,
     time_range: tuple[int, int],
     chare_order: Sequence[str] | None,
+    chares: Sequence[str] | None = None,
+    top_n_chares: int | None = None,
+    show_legend: bool = True,
 ) -> None:
     df = chare_load_by_bin(ds, bin_width_us, pes=pes, time_range=time_range).collect()
     pe_ids = (
@@ -205,18 +262,16 @@ def _draw_timeline_overview(
     pe_pos = {pe: i for i, pe in enumerate(pe_ids)}
     bin_pos = {int(bin_start): i for i, bin_start in enumerate(bin_starts)}
 
-    if chare_order is None:
-        totals = (
-            df.group_by("chare_name")
-            .agg(pl.col("load_us").sum().alias("total"))
-            .sort(["total", "chare_name"], descending=[True, False])
-        )
-        chare_order = totals["chare_name"].to_list()
+    chare_order = _resolve_timeline_chares(df, chare_order, chares, top_n_chares)
     chare_pos = {name: i + 1 for i, name in enumerate(chare_order)}
+    visible_chares = set(chare_order)
+    chare_colors = _chare_colors(chare_order)
 
     matrix = np.zeros((len(pe_ids), len(bin_starts)), dtype=int)
     best_loads: dict[tuple[int, int], int] = {}
     for row in df.iter_rows(named=True):
+        if row["chare_name"] not in visible_chares:
+            continue
         key = (row["pe_id"], row["bin_start"])
         if key not in best_loads or row["load_us"] > best_loads[key]:
             best_loads[key] = row["load_us"]
@@ -225,7 +280,7 @@ def _draw_timeline_overview(
                     row["chare_name"], 0
                 )
 
-    colors = [IDLE_COLOR] + [_chare_colors(chare_order)[name] for name in chare_order]
+    colors = [IDLE_COLOR] + [chare_colors[name] for name in chare_order]
     cmap = mcolors.ListedColormap(colors)
     norm = mcolors.BoundaryNorm(np.arange(len(colors) + 1) - 0.5, len(colors))
     extent = [
@@ -240,6 +295,8 @@ def _draw_timeline_overview(
     if len(pe_ids) <= 32:
         ax.set_yticks(np.arange(len(pe_ids)))
         ax.set_yticklabels(pe_ids)
+    if show_legend:
+        _add_timeline_legend(ax, chare_colors)
 
 
 def timeline_overview(
@@ -249,6 +306,9 @@ def timeline_overview(
     pes: Sequence[int] | None = None,
     time_range: tuple[int, int] | None = None,
     *,
+    chares: Sequence[str] | None = None,
+    top_n_chares: int | None = None,
+    show_legend: bool = True,
     figsize: tuple[float, float] = (14, 6),
 ) -> Figure:
     """Render a PE-by-time image colored by dominant chare per bin."""
@@ -256,7 +316,17 @@ def timeline_overview(
         raise ValueError("timeline_overview currently supports color_by='chare'")
     tr = time_range or ds.time_range_us
     fig, ax = plt.subplots(figsize=figsize)
-    _draw_timeline_overview(ax, ds, bin_width_us, pes, tr, chare_order=None)
+    _draw_timeline_overview(
+        ax,
+        ds,
+        bin_width_us,
+        pes,
+        tr,
+        chare_order=None,
+        chares=chares,
+        top_n_chares=top_n_chares,
+        show_legend=show_legend,
+    )
     ax.set_xlabel("Time (s)")
     fig.tight_layout()
     return fig
@@ -284,12 +354,48 @@ def percent_imbalance(
     return fig
 
 
+def paper_percent_imbalance(
+    ds: TraceDataset,
+    *,
+    total_time_points: int = 100,
+    time_points_us: Sequence[int | float] | None = None,
+    total_nodes: int = 4,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+    max_imbalance: float | None = None,
+    figsize: tuple[float, float] = (12, 4),
+) -> Figure:
+    """Plot cumulative percent imbalance using the original paper semantics."""
+    tr = time_range or ds.time_range_us
+    df = cumulative_percent_imbalance_by_time(
+        ds,
+        total_time_points=total_time_points,
+        time_points_us=time_points_us,
+        total_nodes=total_nodes,
+        pes=pes,
+        time_range=time_range,
+    ).collect()
+
+    fig, ax = plt.subplots(figsize=figsize)
+    x = (df["time_point_us"].to_numpy() - tr[0]) / 1e6
+    ax.plot(x, df["percent_imbalance"].to_numpy(), color="purple", linewidth=1.8)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Percent Imbalance")
+    ax.set_title("Paper Percent Imbalance")
+    ax.set_ylim(0, max_imbalance if max_imbalance is not None else None)
+    fig.tight_layout()
+    return fig
+
+
 def timeline_with_imbalance(
     ds: TraceDataset,
     bin_width_us: int = 100_000,
     pes: Sequence[int] | None = None,
     time_range: tuple[int, int] | None = None,
     *,
+    chares: Sequence[str] | None = None,
+    top_n_chares: int | None = None,
+    show_legend: bool = True,
     figsize: tuple[float, float] = (14, 8),
 ) -> Figure:
     """Create a timeline overview with percent imbalance below it."""
@@ -301,7 +407,17 @@ def timeline_with_imbalance(
         sharex=True,
         gridspec_kw={"height_ratios": [3, 1]},
     )
-    _draw_timeline_overview(timeline_ax, ds, bin_width_us, pes, tr, chare_order=None)
+    _draw_timeline_overview(
+        timeline_ax,
+        ds,
+        bin_width_us,
+        pes,
+        tr,
+        chare_order=None,
+        chares=chares,
+        top_n_chares=top_n_chares,
+        show_legend=show_legend,
+    )
 
     df = percent_imbalance_by_bin(ds, bin_width_us, pes=pes, time_range=tr).collect()
     x = (df["bin_start"].to_numpy() - tr[0]) / 1e6
@@ -309,5 +425,53 @@ def timeline_with_imbalance(
     imbalance_ax.set_xlabel("Time (s)")
     imbalance_ax.set_ylabel("Imbalance (%)")
     imbalance_ax.set_ylim(bottom=0)
+    fig.tight_layout()
+    return fig
+
+
+def timeline_with_paper_imbalance(
+    ds: TraceDataset,
+    bin_width_us: int = 100_000,
+    *,
+    total_time_points: int = 100,
+    time_points_us: Sequence[int | float] | None = None,
+    total_nodes: int = 4,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+    chares: Sequence[str] | None = None,
+    top_n_chares: int | None = None,
+    show_legend: bool = True,
+    max_imbalance: float | None = None,
+    figsize: tuple[float, float] = (14, 6),
+) -> Figure:
+    """Create a timeline overview overlaid with paper-compatible imbalance."""
+    tr = time_range or ds.time_range_us
+    fig, timeline_ax = plt.subplots(figsize=figsize)
+    _draw_timeline_overview(
+        timeline_ax,
+        ds,
+        bin_width_us,
+        pes,
+        tr,
+        chare_order=None,
+        chares=chares,
+        top_n_chares=top_n_chares,
+        show_legend=show_legend,
+    )
+
+    df = cumulative_percent_imbalance_by_time(
+        ds,
+        total_time_points=total_time_points,
+        time_points_us=time_points_us,
+        total_nodes=total_nodes,
+        pes=pes,
+        time_range=time_range,
+    ).collect()
+    x = (df["time_point_us"].to_numpy() - tr[0]) / 1e6
+    imbalance_ax = timeline_ax.twinx()
+    imbalance_ax.plot(x, df["percent_imbalance"].to_numpy(), color="purple", linewidth=1.8)
+    imbalance_ax.set_ylabel("Percent Imbalance")
+    imbalance_ax.set_ylim(0, max_imbalance if max_imbalance is not None else None)
+    timeline_ax.set_xlabel("Time (s)")
     fig.tight_layout()
     return fig

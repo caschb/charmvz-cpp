@@ -9,6 +9,7 @@ from charmvz_vis.analysis import load_imbalance_score, per_pe_utilization
 from charmvz_vis.derived import (
     chare_duration_totals,
     chare_frequency_counts,
+    cumulative_percent_imbalance_by_time,
     percent_imbalance_by_bin,
 )
 
@@ -96,6 +97,19 @@ class TestPaperDerivedMetrics:
         values = imbalance["percent_imbalance"].to_list()
         assert values[0] == pytest.approx(6.6666667)
         assert values[1] == pytest.approx(75.0)
+
+    def test_cumulative_percent_imbalance_by_time_uses_paper_semantics(
+        self,
+        ds: TraceDataset,
+    ) -> None:
+        imbalance = cumulative_percent_imbalance_by_time(
+            ds,
+            time_points_us=[1_000_000, 2_000_000],
+            total_nodes=4,
+        ).collect()
+        values = imbalance["percent_imbalance"].to_list()
+        assert values[0] == pytest.approx(10.0)
+        assert values[1] == pytest.approx(21.2121212)
 
 
 class TestUtilization:

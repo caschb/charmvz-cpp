@@ -25,10 +25,12 @@ from .plots import (
     execution_time_histogram,
     extrema_analysis,
     message_size_histogram,
+    paper_percent_imbalance,
     percent_imbalance,
     time_profile,
     timeline_overview,
     timeline_with_imbalance,
+    timeline_with_paper_imbalance,
     usage_profile,
 )
 
@@ -54,5 +56,7 @@ __all__ = [
     "chare_activity_heatmap",
     "timeline_overview",
     "percent_imbalance",
+    "paper_percent_imbalance",
     "timeline_with_imbalance",
+    "timeline_with_paper_imbalance",
 ]

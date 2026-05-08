@@ -330,6 +330,93 @@ def percent_imbalance_by_bin(
     )
 
 
+def cumulative_percent_imbalance_by_time(
+    ds: TraceDataset,
+    *,
+    total_time_points: int = 100,
+    time_points_us: Sequence[int | float] | None = None,
+    total_nodes: int = 4,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Paper-compatible cumulative percent imbalance over sampled time points.
+
+    This mirrors the original notebook calculation used for the paper plots:
+    for each sampled time point, include every execution whose start time is
+    earlier than that point, group load by ``pe_id % total_nodes``, and compute
+    ``((max(load) / mean(load)) - 1) * 100``.  Durations are not clipped at the
+    sampled time point.
+    """
+    if total_nodes <= 0:
+        raise ValueError("total_nodes must be positive")
+    if total_time_points < 2 and time_points_us is None:
+        raise ValueError("total_time_points must be at least 2")
+
+    spans = compute_entry_spans(ds, pes=pes, time_range=time_range).select(
+        "pe_id",
+        "start_time_us",
+        "wall_duration_us",
+    )
+
+    if time_points_us is None:
+        bounds = spans.select(
+            pl.col("start_time_us").min().alias("min_start_us"),
+            pl.col("start_time_us").max().alias("max_start_us"),
+        ).collect()
+        min_start = bounds.item(0, "min_start_us")
+        max_start = bounds.item(0, "max_start_us")
+        if min_start is None or max_start is None:
+            points: list[float] = []
+        elif min_start == max_start:
+            points = [float(max_start)]
+        else:
+            step = (max_start - min_start) / (total_time_points - 1)
+            points = [min_start + i * step for i in range(1, total_time_points)]
+    else:
+        points = [float(point) for point in time_points_us]
+
+    if not points:
+        return pl.LazyFrame(
+            schema={
+                "time_point_us": pl.Float64,
+                "max_load_us": pl.Int64,
+                "mean_load_us": pl.Float64,
+                "percent_imbalance": pl.Float64,
+            }
+        )
+
+    time_points = pl.LazyFrame({"time_point_us": points})
+    node_loads = (
+        spans.with_columns((pl.col("pe_id") % total_nodes).alias("node"))
+        .join(time_points, how="cross")
+        .filter(pl.col("start_time_us") < pl.col("time_point_us"))
+        .group_by("time_point_us", "node")
+        .agg(pl.col("wall_duration_us").sum().alias("load_us"))
+    )
+
+    return (
+        time_points.join(
+            node_loads.group_by("time_point_us").agg(
+                pl.col("load_us").max().alias("max_load_us"),
+                pl.col("load_us").mean().alias("mean_load_us"),
+            ),
+            on="time_point_us",
+            how="left",
+        )
+        .with_columns(
+            pl.when(pl.col("mean_load_us") > 0)
+            .then(((pl.col("max_load_us") / pl.col("mean_load_us")) - 1) * 100)
+            .otherwise(0.0)
+            .alias("percent_imbalance")
+        )
+        .with_columns(
+            pl.col("max_load_us").fill_null(0),
+            pl.col("mean_load_us").fill_null(0.0),
+        )
+        .sort("time_point_us")
+    )
+
+
 def chare_load_by_bin(
     ds: TraceDataset,
     bin_width_us: int,

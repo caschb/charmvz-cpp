@@ -8,9 +8,11 @@ from .paper import (
     chare_activity_heatmap,
     chare_duration_comparison,
     chare_frequency_comparison,
+    paper_percent_imbalance,
     percent_imbalance,
     timeline_overview,
     timeline_with_imbalance,
+    timeline_with_paper_imbalance,
 )
 from .time_profile import time_profile
 from .usage_profile import usage_profile
@@ -28,5 +30,7 @@ __all__ = [
     "chare_activity_heatmap",
     "timeline_overview",
     "percent_imbalance",
+    "paper_percent_imbalance",
     "timeline_with_imbalance",
+    "timeline_with_paper_imbalance",
 ]

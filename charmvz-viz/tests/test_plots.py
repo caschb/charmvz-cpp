@@ -138,6 +138,36 @@ class TestPaperPlotSmoke:
         assert isinstance(fig, plt.Figure)
         plt.close(fig)
 
+    def test_timeline_overview_top_n_chare_legend(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import timeline_overview
+
+        fig = timeline_overview(
+            ds,
+            bin_width_us=500_000,
+            time_range=(0, 3_000_000),
+            top_n_chares=1,
+        )
+        legend = fig.axes[0].get_legend()
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        assert labels == ["Idle", "Worker"]
+        plt.close(fig)
+
+    def test_timeline_overview_explicit_chare_filter_legend(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import timeline_overview
+
+        fig = timeline_overview(
+            ds,
+            bin_width_us=500_000,
+            time_range=(0, 3_000_000),
+            chares=["Main"],
+        )
+        legend = fig.axes[0].get_legend()
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        assert labels == ["Idle", "Main"]
+        plt.close(fig)
+
     def test_percent_imbalance(self, ds: TraceDataset) -> None:
         from charmvz_vis.plots import percent_imbalance
 
@@ -145,10 +175,30 @@ class TestPaperPlotSmoke:
         assert isinstance(fig, plt.Figure)
         plt.close(fig)
 
+    def test_paper_percent_imbalance(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import paper_percent_imbalance
+
+        fig = paper_percent_imbalance(ds, time_points_us=[1_000_000, 2_000_000])
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
     def test_timeline_with_imbalance(self, ds: TraceDataset) -> None:
         from charmvz_vis.plots import timeline_with_imbalance
 
         fig = timeline_with_imbalance(ds, bin_width_us=500_000, time_range=(0, 3_000_000))
+        assert isinstance(fig, plt.Figure)
+        assert len(fig.axes) == 2
+        plt.close(fig)
+
+    def test_timeline_with_paper_imbalance(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import timeline_with_paper_imbalance
+
+        fig = timeline_with_paper_imbalance(
+            ds,
+            bin_width_us=500_000,
+            time_range=(0, 3_000_000),
+            time_points_us=[1_000_000, 2_000_000],
+        )
         assert isinstance(fig, plt.Figure)
         assert len(fig.axes) == 2
         plt.close(fig)
