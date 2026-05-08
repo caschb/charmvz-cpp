@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import polars as pl
 import pytest
 
 from charmvz_vis import TraceDataset
 from charmvz_vis.analysis import load_imbalance_score, per_pe_utilization
+from charmvz_vis.derived import (
+    chare_duration_totals,
+    chare_frequency_counts,
+    percent_imbalance_by_bin,
+)
 
 
 class TestEntrySpans:
@@ -62,6 +66,36 @@ class TestMessageSpans:
     def test_row_count(self, ds: TraceDataset) -> None:
         msgs = ds.message_spans().collect()
         assert len(msgs) == 6
+
+
+class TestPaperDerivedMetrics:
+    """Tests for derived metrics used by paper-equivalent plots."""
+
+    def test_chare_duration_totals(self, ds: TraceDataset) -> None:
+        totals = chare_duration_totals(ds).collect()
+        by_name = dict(zip(totals["chare_name"].to_list(), totals["total_duration_us"].to_list()))
+        assert by_name == {
+            "Main": 300_000,
+            "Worker": 5_650_000,
+        }
+
+    def test_chare_frequency_counts(self, ds: TraceDataset) -> None:
+        counts = chare_frequency_counts(ds).collect()
+        by_name = dict(zip(counts["chare_name"].to_list(), counts["execution_count"].to_list()))
+        assert by_name == {
+            "Main": 1,
+            "Worker": 11,
+        }
+
+    def test_percent_imbalance_by_bin(self, ds: TraceDataset) -> None:
+        imbalance = percent_imbalance_by_bin(
+            ds,
+            bin_width_us=1_000_000,
+            time_range=(0, 2_000_000),
+        ).collect()
+        values = imbalance["percent_imbalance"].to_list()
+        assert values[0] == pytest.approx(6.6666667)
+        assert values[1] == pytest.approx(75.0)
 
 
 class TestUtilization:

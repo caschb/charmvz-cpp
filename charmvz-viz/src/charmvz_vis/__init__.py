@@ -11,19 +11,24 @@ Quick start::
     fig.savefig("time_profile.png")
 """
 
-from .dataset import TraceDataset
-
 # Analysis functions
 from .analysis import load_imbalance_score, per_interval_utilization, per_pe_utilization
+from .dataset import TraceDataset
 
 # Plot functions — Phase 1
 from .plots import (
+    chare_activity_heatmap,
+    chare_duration_comparison,
+    chare_frequency_comparison,
     comm_per_pe,
     ep_profile,
     execution_time_histogram,
     extrema_analysis,
     message_size_histogram,
+    percent_imbalance,
     time_profile,
+    timeline_overview,
+    timeline_with_imbalance,
     usage_profile,
 )
 
@@ -44,4 +49,10 @@ __all__ = [
     "message_size_histogram",
     "comm_per_pe",
     "extrema_analysis",
+    "chare_duration_comparison",
+    "chare_frequency_comparison",
+    "chare_activity_heatmap",
+    "timeline_overview",
+    "percent_imbalance",
+    "timeline_with_imbalance",
 ]

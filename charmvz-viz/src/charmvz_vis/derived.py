@@ -8,7 +8,7 @@ tables as Polars LazyFrames so that predicate pushdown still applies.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Literal, Sequence
 
 import polars as pl
 
@@ -195,3 +195,155 @@ def bin_spans(
     combined = pl.concat([single_bin, multi_bin], how="diagonal_relaxed")
     drop_cols = [c for c in combined.collect_schema().names() if c.startswith("_")]
     return combined.drop(drop_cols)
+
+
+def _clipped_entry_spans(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Entry spans with a ``clipped_wall_duration_us`` column."""
+    tr = time_range or ds.time_range_us
+    return compute_entry_spans(ds, pes=pes, time_range=tr).with_columns(
+        (
+            pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
+            - pl.max_horizontal(pl.col("start_time_us"), pl.lit(tr[0]))
+        )
+        .clip(lower_bound=0)
+        .alias("clipped_wall_duration_us")
+    )
+
+
+def chare_duration_totals(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Total clipped execution time grouped by chare collection name."""
+    return (
+        _clipped_entry_spans(ds, pes=pes, time_range=time_range)
+        .group_by("chare_name")
+        .agg(pl.col("clipped_wall_duration_us").sum().alias("total_duration_us"))
+        .sort("total_duration_us", descending=True)
+    )
+
+
+def chare_frequency_counts(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Execution count grouped by chare collection name."""
+    return (
+        compute_entry_spans(ds, pes=pes, time_range=time_range)
+        .group_by("chare_name")
+        .agg(pl.len().alias("execution_count"))
+        .sort("execution_count", descending=True)
+    )
+
+
+def chare_activity_matrix(
+    ds: TraceDataset,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+    *,
+    metric: Literal["duration", "frequency"] = "duration",
+) -> pl.LazyFrame:
+    """Per-(PE, chare) activity using total duration or execution count."""
+    spans = _clipped_entry_spans(ds, pes=pes, time_range=time_range)
+    if metric == "duration":
+        value_expr = pl.col("clipped_wall_duration_us").sum().alias("activity")
+    elif metric == "frequency":
+        value_expr = pl.len().alias("activity")
+    else:
+        raise ValueError("metric must be 'duration' or 'frequency'")
+
+    return (
+        spans.group_by("pe_id", "chare_name")
+        .agg(value_expr)
+        .sort("pe_id", "chare_name")
+    )
+
+
+def pe_load_by_bin(
+    ds: TraceDataset,
+    bin_width_us: int,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Busy time per selected PE and time bin, including zero-load rows."""
+    if bin_width_us <= 0:
+        raise ValueError("bin_width_us must be positive")
+
+    tr = time_range or ds.time_range_us
+    t_start, t_end = tr
+    pe_values = (
+        ds.processing_element.select("pe_id")
+        if pes is None
+        else pl.LazyFrame({"pe_id": list(pes)})
+    )
+    n_bins = max(1, (t_end - t_start + bin_width_us - 1) // bin_width_us)
+    bins = pl.LazyFrame(
+        {"bin_start": [t_start + i * bin_width_us for i in range(n_bins)]},
+    )
+
+    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
+    loads = (
+        bin_spans(spans, bin_width_us, tr)
+        .group_by("pe_id", "bin_start")
+        .agg(pl.col("bin_contribution_us").sum().alias("load_us"))
+    )
+
+    return (
+        pe_values.join(bins, how="cross")
+        .join(loads, on=["pe_id", "bin_start"], how="left")
+        .with_columns(pl.col("load_us").fill_null(0))
+        .sort("pe_id", "bin_start")
+    )
+
+
+def percent_imbalance_by_bin(
+    ds: TraceDataset,
+    bin_width_us: int,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Percent load imbalance per time bin.
+
+    Imbalance is ``((max(load) / mean(load)) - 1) * 100``.  Bins where mean
+    load is zero report 0% imbalance.
+    """
+    return (
+        pe_load_by_bin(ds, bin_width_us, pes=pes, time_range=time_range)
+        .group_by("bin_start")
+        .agg(
+            pl.col("load_us").max().alias("max_load_us"),
+            pl.col("load_us").mean().alias("mean_load_us"),
+        )
+        .with_columns(
+            pl.when(pl.col("mean_load_us") > 0)
+            .then(((pl.col("max_load_us") / pl.col("mean_load_us")) - 1) * 100)
+            .otherwise(0.0)
+            .alias("percent_imbalance")
+        )
+        .sort("bin_start")
+    )
+
+
+def chare_load_by_bin(
+    ds: TraceDataset,
+    bin_width_us: int,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> pl.LazyFrame:
+    """Busy time per ``(PE, bin, chare)`` for timeline overview plots."""
+    if bin_width_us <= 0:
+        raise ValueError("bin_width_us must be positive")
+    tr = time_range or ds.time_range_us
+    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
+    return (
+        bin_spans(spans, bin_width_us, tr)
+        .group_by("pe_id", "bin_start", "chare_name")
+        .agg(pl.col("bin_contribution_us").sum().alias("load_us"))
+        .sort("pe_id", "bin_start", "load_us", descending=[False, False, True])
+    )

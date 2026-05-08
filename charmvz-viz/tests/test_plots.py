@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import matplotlib
 import matplotlib.pyplot as plt
-import pytest
 
 from charmvz_vis import TraceDataset
 
@@ -103,4 +102,53 @@ class TestExtremaSmoke:
 
         fig = extrema_analysis(ds, attribute="avg_grain_size", k=2)
         assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
+
+class TestPaperPlotSmoke:
+    """Smoke tests for paper-equivalent plot APIs."""
+
+    def test_chare_duration_comparison(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import chare_duration_comparison
+
+        fig = chare_duration_comparison({"Run A": ds, "Run B": ds})
+        assert isinstance(fig, plt.Figure)
+        labels = [text.get_text() for text in fig.axes[0].get_xticklabels()]
+        assert labels == ["Run A", "Run B"]
+        plt.close(fig)
+
+    def test_chare_frequency_comparison(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import chare_frequency_comparison
+
+        fig = chare_frequency_comparison({"Run A": ds, "Run B": ds})
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
+    def test_chare_activity_heatmap(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import chare_activity_heatmap
+
+        fig = chare_activity_heatmap(ds)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
+    def test_timeline_overview(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import timeline_overview
+
+        fig = timeline_overview(ds, bin_width_us=500_000, time_range=(0, 3_000_000))
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
+    def test_percent_imbalance(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import percent_imbalance
+
+        fig = percent_imbalance(ds, bin_width_us=500_000, time_range=(0, 3_000_000))
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
+    def test_timeline_with_imbalance(self, ds: TraceDataset) -> None:
+        from charmvz_vis.plots import timeline_with_imbalance
+
+        fig = timeline_with_imbalance(ds, bin_width_us=500_000, time_range=(0, 3_000_000))
+        assert isinstance(fig, plt.Figure)
+        assert len(fig.axes) == 2
         plt.close(fig)
