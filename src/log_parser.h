@@ -1,28 +1,31 @@
 #pragma once
 #include "rc_parser.h"
 #include "sts_parser.h"
+#include <functional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 namespace charmvz {
 
 struct TupleHash {
-  template <class T1, class T2>
-  std::size_t operator()(const std::tuple<T1, T2> &p) const {
-    auto h1 = std::hash<T1>{}(std::get<0>(p));
-    auto h2 = std::hash<T2>{}(std::get<1>(p));
-    return h1 ^ (h2 << 1);
-  }
-  template <class T1, class T2, class T3, class T4, class T5>
-  std::size_t operator()(const std::tuple<T1, T2, T3, T4, T5> &p) const {
-    auto h1 = std::hash<T1>{}(std::get<0>(p));
-    auto h2 = std::hash<T2>{}(std::get<1>(p));
-    auto h3 = std::hash<T3>{}(std::get<2>(p));
-    auto h4 = std::hash<T4>{}(std::get<3>(p));
-    auto h5 = std::hash<T5>{}(std::get<4>(p));
-    return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3) ^ (h5 << 4);
+  // Variadic so the chare-instance key can carry a collection id plus all
+  // CHARE_INDEX_SLOTS dimensions. Combines element hashes with an increasing
+  // left shift, matching what the fixed 2- and 5-element versions did.
+  template <class... Ts>
+  std::size_t operator()(const std::tuple<Ts...> &p) const {
+    std::size_t hash = 0;
+    std::size_t shift = 0;
+    std::apply(
+        [&](const auto &...elems) {
+          ((hash ^= std::hash<std::decay_t<decltype(elems)>>{}(elems)
+                    << shift++),
+           ...);
+        },
+        p);
+    return hash;
   }
 };
 
@@ -65,6 +68,8 @@ struct ChareInstanceRecord {
   int32_t index_1;
   int32_t index_2;
   int32_t index_3;
+  int32_t index_4;
+  int32_t index_5;
 };
 
 struct BeginProcessingRecord {
@@ -79,8 +84,11 @@ struct LogParserResult {
   std::vector<MigrationPack> packs;
   std::vector<MigrationUnpack> unpacks;
   std::vector<ProcessingElementRecord> pes;
-  std::unordered_map<std::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>,
-                     ChareInstanceRecord, TupleHash>
+  // Keyed on (collection_id, index_0 .. index_5) -- the chare instance's
+  // natural key.
+  std::unordered_map<
+      std::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>,
+      ChareInstanceRecord, TupleHash>
       chare_instances;
   std::unordered_map<std::tuple<int32_t, int32_t>, BeginProcessingRecord,
                      TupleHash>

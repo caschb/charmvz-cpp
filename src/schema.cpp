@@ -27,12 +27,16 @@ auto entry_method() -> std::shared_ptr<arrow::Schema> {
 }
 
 auto chare_instance() -> std::shared_ptr<arrow::Schema> {
+  // Six index columns, matching the Projections Java reader's `int[6]`. A chare
+  // array populates its first `ndims` columns and leaves the rest zero.
   return arrow::schema({arrow::field("instance_id", arrow::int64(), false),
                         arrow::field("collection_id", arrow::int32(), false),
                         arrow::field("index_0", arrow::int32(), false),
                         arrow::field("index_1", arrow::int32(), false),
                         arrow::field("index_2", arrow::int32(), false),
-                        arrow::field("index_3", arrow::int32(), false)});
+                        arrow::field("index_3", arrow::int32(), false),
+                        arrow::field("index_4", arrow::int32(), false),
+                        arrow::field("index_5", arrow::int32(), false)});
 }
 
 auto execution(const std::vector<std::string> &papi_event_names)

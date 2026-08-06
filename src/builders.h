@@ -102,6 +102,8 @@ private:
   arrow::Int32Builder index_1;
   arrow::Int32Builder index_2;
   arrow::Int32Builder index_3;
+  arrow::Int32Builder index_4;
+  arrow::Int32Builder index_5;
 };
 
 } // namespace charmvz::builders

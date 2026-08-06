@@ -187,23 +187,28 @@ void ChareInstanceBuilder::Append(const ChareInstanceRecord &instance) {
   PARQUET_THROW_NOT_OK(index_1.Append(instance.index_1));
   PARQUET_THROW_NOT_OK(index_2.Append(instance.index_2));
   PARQUET_THROW_NOT_OK(index_3.Append(instance.index_3));
+  PARQUET_THROW_NOT_OK(index_4.Append(instance.index_4));
+  PARQUET_THROW_NOT_OK(index_5.Append(instance.index_5));
   TryFlush();
 }
 
 void ChareInstanceBuilder::Flush() {
   if (instance_id.length() == 0)
     return;
-  std::shared_ptr<arrow::Array> arr_id, arr_cid, arr_i0, arr_i1, arr_i2, arr_i3;
+  std::shared_ptr<arrow::Array> arr_id, arr_cid, arr_i0, arr_i1, arr_i2, arr_i3,
+      arr_i4, arr_i5;
   PARQUET_THROW_NOT_OK(instance_id.Finish(&arr_id));
   PARQUET_THROW_NOT_OK(collection_id.Finish(&arr_cid));
   PARQUET_THROW_NOT_OK(index_0.Finish(&arr_i0));
   PARQUET_THROW_NOT_OK(index_1.Finish(&arr_i1));
   PARQUET_THROW_NOT_OK(index_2.Finish(&arr_i2));
   PARQUET_THROW_NOT_OK(index_3.Finish(&arr_i3));
+  PARQUET_THROW_NOT_OK(index_4.Finish(&arr_i4));
+  PARQUET_THROW_NOT_OK(index_5.Finish(&arr_i5));
 
   auto batch = arrow::RecordBatch::Make(
       schema_, arr_id->length(),
-      {arr_id, arr_cid, arr_i0, arr_i1, arr_i2, arr_i3});
+      {arr_id, arr_cid, arr_i0, arr_i1, arr_i2, arr_i3, arr_i4, arr_i5});
   writer_.WriteBatch(batch);
 }
 

@@ -8,6 +8,15 @@
 constexpr int32_t IDLE_ENTRY = -1;
 constexpr size_t NUMPAPIEVENTS = 6;
 
+// Chare-index slots stored per chare instance. Matches the `int[6]` used by the
+// Projections Java reader (misc/LogEntry.java); Charm++ can in principle write
+// up to 8 dimensions, and anything beyond this many is consumed but not stored.
+constexpr size_t CHARE_INDEX_SLOTS = 6;
+
+// A non-array chare (STS ndims == -1) writes exactly four index values, per
+// charm/src/ck-perf/trace-projections.C.
+constexpr int32_t NON_ARRAY_INDEX_COUNT = 4;
+
 enum class LogType {
   UNKNOWN = -1,
   CREATION = 1,
@@ -55,7 +64,7 @@ struct LogEntry {
   int32_t msglen;
   uint64_t irecvtime;
   uint64_t icputime;
-  int32_t id[4];
+  int32_t id[CHARE_INDEX_SLOTS];
   uint64_t papiValues[NUMPAPIEVENTS];
   int32_t numpes;
   std::vector<int32_t> pes;

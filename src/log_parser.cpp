@@ -13,6 +13,29 @@
 
 namespace charmvz {
 
+namespace {
+
+// How many chare-index values a BEGIN_PROCESSING record carries for this entry
+// point. Per charm/src/ck-perf/trace-projections.C, an array chare writes
+// exactly `ndims` values (as short int when ndims >= 4, as int otherwise --
+// indistinguishable in the text format, where only the count matters), while a
+// non-array chare (ndims == -1) writes four. Reading a fixed four would consume
+// icputime as an index for 3D arrays and leave three values unread for 6D ones.
+auto chare_index_arity(const StsData &sts_data, uint16_t ep_id) -> int32_t {
+  auto ep_it = sts_data.ep_map.find(ep_id);
+  if (ep_it == sts_data.ep_map.end())
+    return NON_ARRAY_INDEX_COUNT;
+
+  auto chare_it = sts_data.chare_map.find(ep_it->second.collection_id);
+  if (chare_it == sts_data.chare_map.end())
+    return NON_ARRAY_INDEX_COUNT;
+
+  const int32_t ndims = chare_it->second.ndims;
+  return ndims >= 1 ? ndims : NON_ARRAY_INDEX_COUNT;
+}
+
+} // namespace
+
 auto process_logs(const std::vector<std::string> &log_file_paths,
                   const StsData &sts_data, const RcData &rc_data,
                   const std::string &output_dir) -> LogParserResult {
@@ -94,7 +117,14 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       case LogType::BEGIN_PROCESSING: {
         iss >> e.mIdx >> e.eIdx >> e.itime >> e.event >> e.pe >> e.msglen >>
             e.irecvtime;
-        iss >> e.id[0] >> e.id[1] >> e.id[2] >> e.id[3];
+        const int32_t index_arity = chare_index_arity(sts_data, e.eIdx);
+        for (int32_t i = 0; i < index_arity; ++i) {
+          int32_t index_value = 0;
+          iss >> index_value;
+          if (i < static_cast<int32_t>(CHARE_INDEX_SLOTS)) {
+            e.id[i] = index_value;
+          }
+        }
         iss >> e.icputime;
         for (int32_t i = 0; i < sts_data.total_papi_events; ++i) {
           uint64_t papi_value = 0;
@@ -118,8 +148,8 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         if (ep_it != sts_data.ep_map.end())
           cid = ep_it->second.collection_id;
 
-        auto chare_tup =
-            std::make_tuple(cid, e.id[0], e.id[1], e.id[2], e.id[3]);
+        auto chare_tup = std::make_tuple(cid, e.id[0], e.id[1], e.id[2],
+                                         e.id[3], e.id[4], e.id[5]);
         if (result.chare_instances.find(chare_tup) ==
             result.chare_instances.end()) {
           ChareInstanceRecord inst;
@@ -129,6 +159,8 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
           inst.index_1 = e.id[1];
           inst.index_2 = e.id[2];
           inst.index_3 = e.id[3];
+          inst.index_4 = e.id[4];
+          inst.index_5 = e.id[5];
           result.chare_instances[chare_tup] = inst;
           chare_builder.Append(inst);
         }
@@ -158,8 +190,9 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         if (ep_it != sts_data.ep_map.end())
           cid = ep_it->second.collection_id;
 
-        auto chare_tup = std::make_tuple(cid, begin.id[0], begin.id[1],
-                                         begin.id[2], begin.id[3]);
+        auto chare_tup =
+            std::make_tuple(cid, begin.id[0], begin.id[1], begin.id[2],
+                            begin.id[3], begin.id[4], begin.id[5]);
         int64_t inst_id = -1;
         auto inst_it = result.chare_instances.find(chare_tup);
         if (inst_it != result.chare_instances.end())
