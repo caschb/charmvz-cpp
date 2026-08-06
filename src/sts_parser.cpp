@@ -6,6 +6,25 @@
 
 namespace charmvz {
 
+namespace {
+
+// Consume whatever remains on the line and trim the surrounding whitespace.
+// `EVENT` and `STAT` names are written unquoted with a bare `%s`, so a name
+// registered with embedded spaces occupies every remaining token. Projections'
+// StsReader concatenates the leftover tokens for the same reason.
+auto read_rest_of_line(std::istringstream &iss) -> std::string {
+  std::string rest;
+  std::getline(iss, rest);
+
+  const auto first = rest.find_first_not_of(" \t\r");
+  if (first == std::string::npos)
+    return {};
+  const auto last = rest.find_last_not_of(" \t\r");
+  return rest.substr(first, last - first + 1);
+}
+
+} // namespace
+
 auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
   StsData data;
   std::ifstream f{std::string(sts_file_path)};
@@ -83,6 +102,26 @@ auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
       iss >> message.msg_idx >> message.size;
       data.messages.push_back(message);
       data.message_map[message.msg_idx] = message;
+    } else if (token == "TOTAL_EVENTS") {
+      iss >> data.total_user_events;
+    } else if (token == "TOTAL_STATS") {
+      iss >> data.total_user_stats;
+    } else if (token == "EVENT") {
+      UserEventRecord user_event;
+      iss >> user_event.event_id;
+      user_event.name = read_rest_of_line(iss);
+      // Charm++ permits the same id to be registered more than once; the first
+      // registration wins, matching Projections' StsReader.
+      if (data.user_event_map.emplace(user_event.event_id, user_event).second) {
+        data.user_events.push_back(user_event);
+      }
+    } else if (token == "STAT") {
+      UserStatRecord user_stat;
+      iss >> user_stat.stat_id;
+      user_stat.name = read_rest_of_line(iss);
+      if (data.user_stat_map.emplace(user_stat.stat_id, user_stat).second) {
+        data.user_stats.push_back(user_stat);
+      }
     }
   }
 

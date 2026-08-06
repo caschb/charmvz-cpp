@@ -29,7 +29,7 @@ parquet_dep = dependency('parquet', required: true, include_type: 'system')
 deps += [arrow_dep, parquet_dep]
 
 # add Catch2 as a dependency
-test_deps = deps + dependency(
+catch2_dep = dependency(
     'Catch2',
     method: 'cmake',
     version: '>=3.10.0',
@@ -37,6 +37,7 @@ test_deps = deps + dependency(
     required: false,
     include_type: 'system',
 )
+test_deps = deps + catch2_dep
 
 charmvz_lib = library(
     'charmvz_lib',
@@ -60,3 +61,16 @@ executable(
     link_with: charmvz_lib,
     dependencies: deps,
 )
+
+# Tests are skipped when Catch2 is not installed, so a plain build never
+# requires it.
+if catch2_dep.found()
+    test_sts_parser = executable(
+        'test_sts_parser',
+        'tests/test_sts_parser.cpp',
+        link_with: charmvz_lib,
+        include_directories: include_directories('src'),
+        dependencies: test_deps,
+    )
+    test('sts_parser', test_sts_parser)
+endif
