@@ -41,16 +41,18 @@ struct CreationRecord {
   std::vector<int32_t> dst_pes;
 };
 
-struct MigrationPack {
-  int32_t src_pe;
-  int64_t pack_start_us;
-  int64_t pack_end_us;
-};
-
-struct MigrationUnpack {
-  int32_t dst_pe;
-  int64_t unpack_start_us;
-  int64_t unpack_end_us;
+// Where one chare-array instance was executing, and when. Stage 3 sorts these
+// per instance and emits a MigrationEpisode wherever `pe_id` changes between
+// consecutive executions. Collected only for collections with STS ndims >= 1:
+// groups and nodegroups have one instance resident on every PE and never
+// migrate, so including them would report every hop between their per-PE
+// instances as a migration.
+struct InstanceLocationRecord {
+  int64_t instance_id;
+  int32_t collection_id;
+  int32_t pe_id;
+  int64_t start_time_us;
+  int64_t end_time_us;
 };
 
 struct ProcessingElementRecord {
@@ -81,8 +83,7 @@ struct BeginProcessingRecord {
 struct LogParserResult {
   std::unordered_map<std::tuple<int32_t, int32_t>, CreationRecord, TupleHash>
       creation_map;
-  std::vector<MigrationPack> packs;
-  std::vector<MigrationUnpack> unpacks;
+  std::vector<InstanceLocationRecord> instance_locations;
   std::vector<ProcessingElementRecord> pes;
   // Keyed on (collection_id, index_0 .. index_5) -- the chare instance's
   // natural key.

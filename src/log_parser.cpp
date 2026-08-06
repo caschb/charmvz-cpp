@@ -34,6 +34,14 @@ auto chare_index_arity(const StsData &sts_data, uint16_t ep_id) -> int32_t {
   return ndims >= 1 ? ndims : NON_ARRAY_INDEX_COUNT;
 }
 
+// Only chare arrays (STS ndims >= 1) can migrate between PEs. Groups and
+// nodegroups have one instance per PE, so treating their executions as the
+// movement of a single instance would fabricate migrations.
+auto is_chare_array(const StsData &sts_data, int32_t collection_id) -> bool {
+  auto chare_it = sts_data.chare_map.find(collection_id);
+  return chare_it != sts_data.chare_map.end() && chare_it->second.ndims >= 1;
+}
+
 } // namespace
 
 auto process_logs(const std::vector<std::string> &log_file_paths,
@@ -70,8 +78,6 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
     std::getline(log_stream, line);
 
     LogEntry last_begin_idle{};
-    int64_t last_pack_start = 0;
-    int64_t last_unpack_start = 0;
     std::unordered_map<int32_t, LogEntry> open_processing_entries;
 
     while (std::getline(log_stream, line)) {
@@ -200,6 +206,21 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
 
         exec_builder.Append(begin, e, current_pe_id,
                             rc_data.global_start_time_us, inst_id);
+
+        // Retain this execution's location so Stage 3 can detect migrations as
+        // changes of PE. Only chare arrays migrate, so skip everything else.
+        if (inst_id >= 0 && is_chare_array(sts_data, cid)) {
+          InstanceLocationRecord loc;
+          loc.instance_id = inst_id;
+          loc.collection_id = cid;
+          loc.pe_id = current_pe_id;
+          loc.start_time_us =
+              static_cast<int64_t>(begin.itime) - rc_data.global_start_time_us;
+          loc.end_time_us =
+              static_cast<int64_t>(e.itime) - rc_data.global_start_time_us;
+          result.instance_locations.push_back(loc);
+        }
+
         open_processing_entries.erase(begin_it);
         break;
       }
@@ -213,34 +234,11 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         idle_builder.Append(last_begin_idle, e, rc_data.global_start_time_us);
         break;
       }
-      case LogType::BEGIN_PACK: {
-        iss >> e.itime >> e.pe;
-        last_pack_start = e.itime;
-        break;
-      }
-      case LogType::END_PACK: {
-        iss >> e.itime >> e.pe;
-        MigrationPack p;
-        p.src_pe = current_pe_id;
-        p.pack_start_us = last_pack_start;
-        p.pack_end_us = e.itime;
-        result.packs.push_back(p);
-        break;
-      }
-      case LogType::BEGIN_UNPACK: {
-        iss >> e.itime >> e.pe;
-        last_unpack_start = e.itime;
-        break;
-      }
-      case LogType::END_UNPACK: {
-        iss >> e.itime >> e.pe;
-        MigrationUnpack u;
-        u.dst_pe = current_pe_id;
-        u.unpack_start_us = last_unpack_start;
-        u.unpack_end_us = e.itime;
-        result.unpacks.push_back(u);
-        break;
-      }
+      // BEGIN_PACK / END_PACK / BEGIN_UNPACK / END_UNPACK are deliberately not
+      // collected. They are emitted by CkPackMessage() / CkUnpackMessage()
+      // around ordinary message serialisation, not around chare migration, so
+      // they cannot be used to reconstruct MigrationEpisode. See the comment on
+      // schema::migration_episode().
       case LogType::BEGIN_COMPUTATION: {
         iss >> e.itime;
         ProcessingElementRecord per;

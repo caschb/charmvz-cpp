@@ -127,21 +127,25 @@ auto idle_interval() -> std::shared_ptr<arrow::Schema> {
                         arrow::field("duration_us", arrow::int64(), true)});
 }
 
+// A migration is derived from a change of PE between consecutive executions of
+// the same chare-array instance -- NOT from BEGIN_PACK/END_PACK, which the
+// runtime emits around ordinary message serialisation in CkPackMessage() and
+// never around migration (CkLocMgr::emigrate() emits no pack tracing at all).
+// Consequently there is no observable pack/unpack cost for a migration; the
+// timing available is the bracket between the last execution on the source PE
+// and the first on the destination, whose width is an upper bound on the true
+// migration cost because it also contains queueing and load-balancer time.
 auto migration_episode() -> std::shared_ptr<arrow::Schema> {
   return arrow::schema(
       {arrow::field("migration_id", arrow::int64(), false),
+       arrow::field("instance_id", arrow::int64(), false),
+       arrow::field("collection_id", arrow::int32(), false),
        arrow::field("src_pe", arrow::int32(), false),
-       arrow::field("pack_start_us", arrow::int64(), false),
-       arrow::field("pack_end_us", arrow::int64(), true),
-       arrow::field("dst_pe", arrow::int32(), true),
-       arrow::field("unpack_start_us", arrow::int64(), true),
-       arrow::field("unpack_end_us", arrow::int64(), true),
-       arrow::field("instance_id", arrow::int64(), true),
-       arrow::field("ambiguous", arrow::boolean(), false),
-       arrow::field("pack_duration_us", arrow::int64(), true),
-       arrow::field("unpack_duration_us", arrow::int64(), true),
-       arrow::field("total_migration_us", arrow::int64(), true),
-       arrow::field("network_transit_us", arrow::int64(), true)});
+       arrow::field("dst_pe", arrow::int32(), false),
+       arrow::field("last_exec_end_src_us", arrow::int64(), false),
+       arrow::field("first_exec_start_dst_us", arrow::int64(), false),
+       arrow::field("gap_us", arrow::int64(), false),
+       arrow::field("migration_seq", arrow::int32(), false)});
 }
 
 } // namespace charmvz::schema

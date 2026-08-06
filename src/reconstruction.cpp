@@ -3,9 +3,9 @@
 #include "schema.h"
 #include <algorithm>
 #include <arrow/builder.h>
-#include <limits>
-#include <map>
 #include <spdlog/spdlog.h>
+#include <unordered_map>
+#include <vector>
 
 namespace charmvz {
 
@@ -134,85 +134,66 @@ void reconstruct_message_and_migration(const LogParserResult &log_data,
   }
   flush_msg();
 
-  // Migrations MVP (Rule 9 Episode Correlation)
+  // MigrationEpisode (Rule 9): a migration is a change of PE between two
+  // consecutive executions of the same chare-array instance. Pack/unpack events
+  // are not involved -- see the comment on schema::migration_episode().
   ParquetWriter mig_writer(charmvz::schema::migration_episode(),
                            output_dir + "/migration_episode.parquet");
   spdlog::info("Writing MigrationEpisode.parquet");
 
-  arrow::Int64Builder mig_id, p_start, p_end, u_start, u_end, inst, p_dur,
-      u_dur, tot_mig, net_trans;
-  arrow::Int32Builder mig_src, mig_dst;
-  arrow::BooleanBuilder ambig;
+  arrow::Int64Builder mig_id, mig_inst, src_end, dst_start, gap;
+  arrow::Int32Builder mig_coll, mig_src, mig_dst, mig_seq;
 
-  auto packs = log_data.packs;
-
-  std::sort(packs.begin(), packs.end(),
-            [](const MigrationPack &a, const MigrationPack &b) {
-              return a.pack_start_us < b.pack_start_us;
-            });
-
-  std::multimap<int64_t, MigrationUnpack> available_unpacks;
-  for (const auto &u : log_data.unpacks) {
-    available_unpacks.insert({u.unpack_start_us, u});
-  }
+  // Group executions by instance, then order each instance's executions in
+  // time. Timestamps are already aligned to the global start, so they are
+  // comparable across PEs.
+  std::unordered_map<int64_t, std::vector<const InstanceLocationRecord *>>
+      by_instance;
+  for (const auto &loc : log_data.instance_locations)
+    by_instance[loc.instance_id].push_back(&loc);
 
   int64_t migration_id = 0;
 
-  for (const auto &pack : packs) {
-    migration_id++;
-    PARQUET_THROW_NOT_OK(mig_id.Append(migration_id));
-    PARQUET_THROW_NOT_OK(mig_src.Append(pack.src_pe));
-    PARQUET_THROW_NOT_OK(
-        p_start.Append(pack.pack_start_us - rc_data.global_start_time_us));
-    PARQUET_THROW_NOT_OK(
-        p_end.Append(pack.pack_end_us - rc_data.global_start_time_us));
+  for (auto &[instance_id, locations] : by_instance) {
+    std::sort(
+        locations.begin(), locations.end(),
+        [](const InstanceLocationRecord *a, const InstanceLocationRecord *b) {
+          return a->start_time_us < b->start_time_us;
+        });
 
-    auto up_it = available_unpacks.lower_bound(pack.pack_end_us);
+    int32_t sequence = 0;
+    for (size_t i = 1; i < locations.size(); ++i) {
+      const auto *previous = locations[i - 1];
+      const auto *current = locations[i];
+      if (previous->pe_id == current->pe_id)
+        continue;
 
-    if (up_it != available_unpacks.end()) {
-      const auto &up_ack = up_it->second;
-      PARQUET_THROW_NOT_OK(mig_dst.Append(up_ack.dst_pe));
-      PARQUET_THROW_NOT_OK(u_start.Append(up_ack.unpack_start_us -
-                                          rc_data.global_start_time_us));
+      ++migration_id;
+      ++sequence;
+      PARQUET_THROW_NOT_OK(mig_id.Append(migration_id));
+      PARQUET_THROW_NOT_OK(mig_inst.Append(instance_id));
+      PARQUET_THROW_NOT_OK(mig_coll.Append(current->collection_id));
+      PARQUET_THROW_NOT_OK(mig_src.Append(previous->pe_id));
+      PARQUET_THROW_NOT_OK(mig_dst.Append(current->pe_id));
+      PARQUET_THROW_NOT_OK(src_end.Append(previous->end_time_us));
+      PARQUET_THROW_NOT_OK(dst_start.Append(current->start_time_us));
       PARQUET_THROW_NOT_OK(
-          u_end.Append(up_ack.unpack_end_us - rc_data.global_start_time_us));
-      PARQUET_THROW_NOT_OK(
-          u_dur.Append(up_ack.unpack_end_us - up_ack.unpack_start_us));
-      PARQUET_THROW_NOT_OK(
-          net_trans.Append(up_ack.unpack_start_us - pack.pack_end_us));
-      PARQUET_THROW_NOT_OK(
-          tot_mig.Append(up_ack.unpack_end_us - pack.pack_start_us));
-
-      available_unpacks.erase(up_it);
-    } else {
-      PARQUET_THROW_NOT_OK(mig_dst.AppendNull());
-      PARQUET_THROW_NOT_OK(u_start.AppendNull());
-      PARQUET_THROW_NOT_OK(u_end.AppendNull());
-      PARQUET_THROW_NOT_OK(u_dur.AppendNull());
-      PARQUET_THROW_NOT_OK(net_trans.AppendNull());
-      PARQUET_THROW_NOT_OK(tot_mig.AppendNull());
+          gap.Append(current->start_time_us - previous->end_time_us));
+      PARQUET_THROW_NOT_OK(mig_seq.Append(sequence));
     }
-    PARQUET_THROW_NOT_OK(p_dur.Append(pack.pack_end_us - pack.pack_start_us));
-    PARQUET_THROW_NOT_OK(inst.AppendNull()); // Inference optional
-    PARQUET_THROW_NOT_OK(ambig.Append(
-        true)); // Marked ambiguous since we infer purely by time proximity
   }
 
   if (mig_id.length() > 0) {
-    std::vector<std::shared_ptr<arrow::Array>> arrays(13);
+    std::vector<std::shared_ptr<arrow::Array>> arrays(9);
     PARQUET_THROW_NOT_OK(mig_id.Finish(&arrays[0]));
-    PARQUET_THROW_NOT_OK(mig_src.Finish(&arrays[1]));
-    PARQUET_THROW_NOT_OK(p_start.Finish(&arrays[2]));
-    PARQUET_THROW_NOT_OK(p_end.Finish(&arrays[3]));
+    PARQUET_THROW_NOT_OK(mig_inst.Finish(&arrays[1]));
+    PARQUET_THROW_NOT_OK(mig_coll.Finish(&arrays[2]));
+    PARQUET_THROW_NOT_OK(mig_src.Finish(&arrays[3]));
     PARQUET_THROW_NOT_OK(mig_dst.Finish(&arrays[4]));
-    PARQUET_THROW_NOT_OK(u_start.Finish(&arrays[5]));
-    PARQUET_THROW_NOT_OK(u_end.Finish(&arrays[6]));
-    PARQUET_THROW_NOT_OK(inst.Finish(&arrays[7]));
-    PARQUET_THROW_NOT_OK(ambig.Finish(&arrays[8]));
-    PARQUET_THROW_NOT_OK(p_dur.Finish(&arrays[9]));
-    PARQUET_THROW_NOT_OK(u_dur.Finish(&arrays[10]));
-    PARQUET_THROW_NOT_OK(tot_mig.Finish(&arrays[11]));
-    PARQUET_THROW_NOT_OK(net_trans.Finish(&arrays[12]));
+    PARQUET_THROW_NOT_OK(src_end.Finish(&arrays[5]));
+    PARQUET_THROW_NOT_OK(dst_start.Finish(&arrays[6]));
+    PARQUET_THROW_NOT_OK(gap.Finish(&arrays[7]));
+    PARQUET_THROW_NOT_OK(mig_seq.Finish(&arrays[8]));
     auto batch = arrow::RecordBatch::Make(charmvz::schema::migration_episode(),
                                           arrays[0]->length(), arrays);
     mig_writer.WriteBatch(batch);
