@@ -105,6 +105,36 @@ TEST_CASE("ParquetWriter preserves schema key-value metadata",
         "PAPI_L2_TCA");
 }
 
+TEST_CASE("ParquetWriter compresses by default",
+          "[parquet_writer][regression]") {
+  // Parquet's own default is UNCOMPRESSED, which cost ~2.5x the output size on
+  // real trace data. A regression here is invisible except as disk usage.
+  TempParquetPath out;
+
+  auto schema = arrow::schema({arrow::field("value", arrow::int64(), false)});
+  {
+    charmvz::ParquetWriter writer(schema, out.str());
+    arrow::Int64Builder values;
+    arrow::Status appended;
+    for (int64_t i = 0; i < 4096 && appended.ok(); ++i) {
+      appended = values.Append(i % 17);
+    }
+    REQUIRE(appended.ok());
+    std::shared_ptr<arrow::Array> array;
+    REQUIRE(values.Finish(&array).ok());
+    writer.WriteBatch(
+        arrow::RecordBatch::Make(schema, array->length(), {array}));
+  }
+
+  auto infile = arrow::io::ReadableFile::Open(out.str()).ValueOrDie();
+  auto reader = parquet::arrow::OpenFile(infile, arrow::default_memory_pool())
+                    .ValueOrDie();
+  const auto column =
+      reader->parquet_reader()->metadata()->RowGroup(0)->ColumnChunk(0);
+  CHECK(column->compression() == charmvz::kDefaultCompression);
+  CHECK(column->compression() != parquet::Compression::UNCOMPRESSED);
+}
+
 TEST_CASE("ParquetWriter round-trips rows and column types",
           "[parquet_writer]") {
   TempParquetPath out;
