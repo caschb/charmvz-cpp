@@ -14,8 +14,16 @@ ParquetWriter::ParquetWriter(std::shared_ptr<arrow::Schema> schema,
   }
   out_stream_ = *out_result;
 
+  // store_schema() serialises the Arrow schema into the file, which is the only
+  // way schema-level key-value metadata survives the write. Arrow defaults it
+  // off, and without it `schema::execution()`'s papi_event_N -> counter-name
+  // mapping is silently dropped, leaving papi_delta_0..5 unidentifiable.
+  auto arrow_props =
+      parquet::ArrowWriterProperties::Builder().store_schema()->build();
+
   auto writer_result = parquet::arrow::FileWriter::Open(
-      *schema_, arrow::default_memory_pool(), out_stream_);
+      *schema_, arrow::default_memory_pool(), out_stream_,
+      parquet::default_writer_properties(), arrow_props);
   if (!writer_result.ok()) {
     spdlog::error("Failed to open parquet writer for {}: {}", file_path,
                   writer_result.status().ToString());
