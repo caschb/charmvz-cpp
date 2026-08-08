@@ -24,8 +24,10 @@ class TraceDataset:
     Parameters
     ----------
     trace_dir : str or Path
-        Directory containing the 8 Parquet files produced by the ``charmvz``
-        C++ pipeline.
+        Directory containing the Parquet files produced by the ``charmvz``
+        C++ pipeline. The eight core entity tables are required; the three
+        listed in ``_OPTIONAL_FILES`` are not, so output written by an older
+        build of the pipeline still loads.
 
     Examples
     --------
@@ -43,6 +45,16 @@ class TraceDataset:
         "message": "message.parquet",
         "idle_interval": "idle_interval.parquet",
         "migration_episode": "migration_episode.parquet",
+    }
+
+    # Added by Phase 1.1 of the CCGrid 2027 work. Kept out of the required set
+    # deliberately: `user_event` and `simulation_step` are empty or absent
+    # unless the traced application instruments itself, and refusing to open an
+    # uninstrumented trace would be wrong.
+    _OPTIONAL_FILES = {
+        "user_event": "user_event.parquet",
+        "simulation_step": "simulation_step.parquet",
+        "message_type": "message_type.parquet",
     }
 
     def __init__(self, trace_dir: str | Path) -> None:
@@ -72,6 +84,21 @@ class TraceDataset:
             path = self.trace_dir / self._FILES[name]
             self._tables[name] = pl.scan_parquet(path)
         return self._tables[name]
+
+    def _scan_optional(self, name: str) -> pl.LazyFrame | None:
+        """Lazy-scan an optional table, returning None when it was not written."""
+        if name not in self._tables:
+            path = self.trace_dir / self._OPTIONAL_FILES[name]
+            if not path.exists():
+                return None
+            self._tables[name] = pl.scan_parquet(path)
+        return self._tables[name]
+
+    def has_table(self, name: str) -> bool:
+        """Whether an optional table is present in this trace directory."""
+        if name not in self._OPTIONAL_FILES:
+            return name in self._FILES
+        return (self.trace_dir / self._OPTIONAL_FILES[name]).exists()
 
     # ── Entity table accessors ───────────────────────────────────────────
 
@@ -112,8 +139,43 @@ class TraceDataset:
 
     @property
     def migration_episode(self) -> pl.LazyFrame:
-        """MigrationEpisode table (one row per pack/unpack cycle)."""
+        """MigrationEpisode table (one row per PE transition of an instance)."""
         return self._scan("migration_episode")
+
+    @property
+    def user_event(self) -> pl.LazyFrame | None:
+        """UserEvent table, or None when the pipeline did not write one.
+
+        One row per application-emitted trace event. A matched bracket is a
+        single row with both timestamps; the instantaneous forms have a null
+        ``end_time_us``.
+        """
+        return self._scan_optional("user_event")
+
+    @property
+    def simulation_step(self) -> pl.LazyFrame | None:
+        """SimulationStep table, or None when the pipeline did not write one.
+
+        One row per ``(step_id, pe_id)``. Attribute an execution to the step
+        whose interval **on its own PE** contains it — the per-step global
+        extent is denormalized into ``global_start_time_us`` /
+        ``global_end_time_us`` for display, and those overlap between adjacent
+        steps, so they must not be used for attribution.
+
+        Empty for a trace whose application does not emit step boundaries,
+        which is the case for both current reference traces.
+        """
+        return self._scan_optional("simulation_step")
+
+    @property
+    def message_type(self) -> pl.LazyFrame | None:
+        """MessageType lookup, or None when the pipeline did not write one.
+
+        Carries the *declared* size of each message type. Use ``msg_len`` on
+        ``execution`` / ``message`` for observed volume; the declared size is 0
+        for most types in the ChaNGa reference trace.
+        """
+        return self._scan_optional("message_type")
 
     # ── Convenience metadata ─────────────────────────────────────────────
 
