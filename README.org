@@ -1,193 +1,266 @@
-* NOTE
-
-This project is still under active development and isn't working correctly.
-
 * CharmVZ
 
-A high-performance alternative to the Projections visualization tool for analyzing Charm++ trace files. Instead of providing a GUI interface, CharmVZ converts trace data into Parquet files that can be easily analyzed using R, Python, Julia, and other data science tools.
+A batch alternative to the Projections visualization tool for analyzing Charm++ trace files. Instead of providing a GUI, CharmVZ converts a trace directory into a set of Parquet tables that can be queried from Python, R, Julia, DuckDB, or anything else that reads Parquet.
+
+The repository also contains [[file:charmvz-viz/][charmvz-viz]], a Python package that reads those tables and reproduces the Projections visualizations.
+
+** Status
+
+Working. The pipeline builds, runs end to end, and processes the project's reference traces correctly: a 4-PE ChaNGa trace (6.6M executions) in about 25 s, and the two 80-PE LeanMD traces. Row counts for all three are pinned as regression baselines.
+
+Two caveats worth knowing before relying on it:
+
+- The trace format is pinned to Projections version *11.0*. The STS parser rejects any other ~VERSION~ outright rather than guessing.
+- Aggregate output has not yet been cross-validated against Projections itself. The reconstruction follows the documented rules and the derived counts are internally consistent, but a side-by-side comparison against the Java tool is still outstanding.
 
 ** Overview
 
-CharmVZ (Charm Visualization) is designed to bridge the gap between Charm++ performance tracing and modern data analysis workflows. While [[https://github.com/charmplusplus/projections][Projections]] provides an excellent GUI for interactive visualization, CharmVZ focuses on enabling programmatic analysis and custom visualizations by converting trace data into structured, queryable formats.
+CharmVZ bridges Charm++ performance tracing and modern data analysis. [[https://github.com/charmplusplus/projections][Projections]] provides an interactive GUI; CharmVZ targets programmatic analysis, scripted comparison across runs, and custom visualization, by turning the trace into a normalized relational schema.
 
-*** Key Features
+*** Key features
 
-- *Fast trace processing*: C++20 implementation optimized for large trace files
-- *Parquet output*: Industry-standard columnar format for efficient analytics
-- *Complete timeline reconstruction*: Implements the same state machine as Projections
-- *Multi-language support*: Generated data can be analyzed in R, Python, Julia, etc.
-- *Batch processing*: Designed for automated analysis pipelines
-- *Configurable filtering*: Time range and duration-based event filtering
+- *Streaming*: logs are parsed line by line and flushed in row groups, so a multi-gigabyte trace never lands in memory at once
+- *Transparent decompression*: plain ~.log~ and gzipped ~.log.gz~ are read the same way, and a single trace directory may mix both
+- *Normalized schema*: 11 tables with explicit keys, rather than one flat event dump
+- *Precomputed derived columns*: durations, queue waits and PAPI deltas are stored, not recomputed downstream
+- *Compressed output*: ZSTD by default, measured 2.54x smaller than Parquet's uncompressed default for about 7% more wall time
+- *Application semantics*: user events are materialized, and application-declared timesteps become a first-class dimension
 
 ** Installation
 
 *** Prerequisites
 
-- C++20 compatible compiler (GCC 10+, Clang 12+, or MSVC 2019+)
-- [[https://mesonbuild.com/][Meson]] build system
-- [[https://ninja-build.org/][Ninja]] build backend
+- C++20 compatible compiler (GCC 10+ or Clang 12+)
+- [[https://mesonbuild.com/][Meson]] build system and [[https://ninja-build.org/][Ninja]] backend
 
 *** Dependencies
 
-CharmVZ automatically manages the following dependencies through Meson:
+All but one are *system dependencies* that must be installed beforehand; Meson locates them with ~dependency()~ and does not fetch them.
 
-- *spdlog* (≥1.15.3): Logging framework
-- *CLI11* (≥2.5.0): Command-line argument parsing  
-- *zlib*: Compression support for .gz log files
-- *zstr*: C++ wrapper for compressed stream I/O
-- *Catch2* (≥3.10.0): Testing framework (development only)
+- *Apache Arrow* and *Parquet* (C++): the output format
+- *spdlog* (>= 1.15.3): logging
+- *CLI11* (>= 2.5.0): command-line parsing
+- *zlib*: gzip support for compressed logs
+- *Catch2* (>= 3.10.0): tests only, and optional. The test targets are guarded by ~if catch2_dep.found()~, so a build without it still succeeds and simply skips them
 
-*** Build Instructions
+~zstr~ is the one vendored dependency: a git submodule at ~subprojects/zstr~, consumed as a CMake subproject.
+
+On macOS with Homebrew:
 
 #+begin_src bash
-# Clone the repository
-git clone https://github.com/caschb/charmvz-cpp.git
+brew install meson ninja apache-arrow spdlog cli11 catch2
+#+end_src
+
+*** Build instructions
+
+#+begin_src bash
+# Clone, including the zstr submodule
+git clone --recurse-submodules https://github.com/caschb/charmvz-cpp.git
 cd charmvz-cpp
+# (if already cloned without it: git submodule update --init --recursive)
 
-# Configure the build
-meson setup build
+# Release build
+meson setup builddir-rel --buildtype=release
+meson compile -C builddir-rel
 
-# Compile
-meson compile -C build
+# Tests
+meson test -C builddir-rel
+#+end_src
 
-# Run tests (optional)
-meson test -C build
+A ~justfile~ automates the sanitizer build used for development:
+
+#+begin_src bash
+just compile-debug   # configures builddir-deb with ASan + UBSan, then compiles
+just cleanup-debug
+#+end_src
+
+Log verbosity is set through the ~SPDLOG_LEVEL~ environment variable, not a flag:
+
+#+begin_src bash
+SPDLOG_LEVEL=debug ./builddir-rel/charmvz -l traces/ -o out/
 #+end_src
 
 ** Usage
 
-*** Basic Timeline Analysis
+*** Command line
 
 #+begin_src bash
-# Process a single trace file
-./build/charmvz trace_file.sts log_directory/
-
-# Process with time range filtering
-./build/charmvz trace_file.sts log_directory/ --start-time 1000 --end-time 5000
-
-# Filter short events (minimum duration in microseconds)
-./build/charmvz trace_file.sts log_directory/ --min-duration 100
+./builddir-rel/charmvz -l <trace_dir> -o <output_dir> [-s <step_event_name>]
 #+end_src
 
-*** Input Files
+| Option | Required | Description |
+|--------+----------+-------------|
+| ~-l~, ~--logs~ | yes | Directory holding the ~.sts~, ~.projrc~ and per-PE log files |
+| ~-o~, ~--output~ | yes | Directory for the Parquet output; created if absent |
+| ~-s~, ~--step-event~ | no | Name of the registered user event that delimits a timestep (default ~SimulationStep~) |
 
-CharmVZ processes standard Charm++ trace files:
+The whole trace directory is passed at once, not a single file: CharmVZ discovers the ~.sts~, the ~.projrc~ and every log inside it, and needs all of them to align timestamps across PEs.
 
-- *STS file* (~*.sts~): Summary trace specification containing metadata
-- *Log files* (~*.prj.N.log.gz~): Compressed per-processor trace logs
+*** Input files
 
-These files are generated by running Charm++ applications with tracing enabled:
+Standard Charm++ Projections output, produced by building with ~-tracemode projections~ and running with ~+traceroot~:
+
+- ~<pgm>.sts~ -- symbol table: chare, entry-method, message and user-event names; PE count; PAPI counter names
+- ~<pgm>.projrc~ -- global start and end time, needed for cross-PE alignment
+- ~<pgm>.<pe>.log~ or ~<pgm>.<pe>.log.gz~ -- one time-ordered event log per PE
 
 #+begin_src bash
-# Enable tracing in your Charm++ application
-./charmrun +p4 ./myapp ++trace-dir traces/
+./charmrun +p4 ./myapp +traceroot traces/
 #+end_src
 
-*** Output Format
+A Charm++ built with ~-DZLIB=1~ writes the logs gzipped. Both forms are read transparently, and mixing them in one directory is fine.
 
-CharmVZ generates structured data files suitable for analysis:
+*** Output tables
 
-- *Timeline events*: Begin/end times, entry points, processor information
-- *Message data*: Send/receive times, message sizes, communication patterns  
-- *Performance metrics*: Execution times, idle periods, packing overhead
-- *Metadata*: Log IDs, processor mappings, trace statistics
+| Table | Primary key | Contents |
+|-------+-------------+----------|
+| ~processing_element.parquet~ | ~pe_id~ | One row per PE log file |
+| ~chare_collection.parquet~ | ~collection_id~ | Chare types, with their ~ndims~ |
+| ~entry_method.parquet~ | ~ep_id~ | Entry methods and their owning collection |
+| ~message_type.parquet~ | ~msg_idx~ | Declared message sizes from the STS |
+| ~chare_instance.parquet~ | ~instance_id~ | Chare elements; natural key ~(collection_id, index_0..5)~ |
+| ~execution.parquet~ | ~(pe_id, event)~ | Paired BEGIN/END_PROCESSING, with PAPI counters |
+| ~message.parquet~ | ~message_id~ | Sends linked to their receiving execution |
+| ~idle_interval.parquet~ | ~(pe_id, start_time_us)~ | Paired BEGIN/END_IDLE |
+| ~migration_episode.parquet~ | ~migration_id~ | PE transitions of chare-array elements |
+| ~user_event.parquet~ | -- | Application-emitted trace events |
+| ~simulation_step.parquet~ | ~(step_id, pe_id)~ | Application timesteps |
 
-** Programming Interface
+All timestamps are in microseconds and aligned to the run's global start, so they are directly comparable across PEs.
 
-*** C++ API
+*** Timesteps
+
+The Charm++ runtime has no notion of a timestep, so ~simulation_step.parquet~ is populated only when the application declares its own boundaries. To make that happen, register a user event and bracket each step with it, passing the step index as the ~nestedID~ argument:
 
 #+begin_src cpp
-#include "timeline.h"
+// once, at startup
+int stepUE = traceRegisterUserEvent("SimulationStep");
 
-// Basic timeline creation
-Timeline timeline = create_timeline("app.prj.0.log.gz");
-
-// Advanced filtering
-Timeline filtered = create_timeline("app.prj.0.log.gz", 
-                                   start_time, end_time, min_duration);
-
-// Access timeline events
-for (const auto& event : timeline.events) {
-    std::cout << "Entry " << event.entry_point 
-              << " ran for " << (event.end_time - event.begin_time) 
-              << " microseconds\n";
-}
+// around each timestep
+beginUserBracketEvent(stepUE, step);
+// ... the timestep ...
+endUserBracketEvent(stepUE, step);
 #+end_src
 
-*** Data Analysis Examples
+Pass a different name with ~-s~ if you register one. If no matching event is found, CharmVZ logs a note and writes an empty ~simulation_step.parquet~ -- an uninstrumented trace is a normal input, not an error.
 
-Once you have the generated data files, you can analyze them using your preferred tools:
+The table has one row per ~(step_id, pe_id)~. Attribute an execution to the step whose interval *on its own PE* contains it: PEs cross a boundary microseconds apart, so the denormalized ~global_start_time_us~ / ~global_end_time_us~ columns overlap between adjacent steps and are for display rather than attribution.
 
-**** Python with Pandas
+** Analysis examples
+
+*** Python with polars
+
+#+begin_src python
+import polars as pl
+
+execution = pl.scan_parquet("out/execution.parquet")
+entry_method = pl.scan_parquet("out/entry_method.parquet")
+
+# Time spent per entry method, named rather than numbered
+by_ep = (
+    execution.group_by("ep_id")
+    .agg(
+        pl.col("wall_duration_us").sum().alias("total_us"),
+        pl.col("wall_duration_us").mean().alias("mean_us"),
+        pl.len().alias("calls"),
+    )
+    .join(entry_method.select("ep_id", "name"), on="ep_id")
+    .sort("total_us", descending=True)
+)
+print(by_ep.collect().head(10))
+#+end_src
+
+*** Python with pandas
 
 #+begin_src python
 import pandas as pd
 
-# Load timeline data
-df = pd.read_parquet('timeline_events.parquet')
+df = pd.read_parquet("out/execution.parquet")
 
-# Analyze execution times by entry point
-execution_times = df.groupby('entry_point')['duration'].agg(['mean', 'std', 'count'])
+# Load imbalance: busy time per PE
+per_pe = df.groupby("pe_id")["wall_duration_us"].sum()
+print("max/mean =", per_pe.max() / per_pe.mean())
 
-# Visualize communication patterns
-import matplotlib.pyplot as plt
-df['duration'].hist(bins=50)
-plt.xlabel('Event Duration (μs)')
-plt.ylabel('Frequency')
-plt.show()
+df["wall_duration_us"].hist(bins=50)
 #+end_src
 
-**** R with dplyr
+*** R with arrow and dplyr
 
 #+begin_src r
+library(arrow)
 library(dplyr)
-library(ggplot2)
 
-# Load and analyze timeline data
-timeline <- read_parquet("timeline_events.parquet")
+execution <- read_parquet("out/execution.parquet")
 
-# Summarize by processor
-proc_summary <- timeline %>%
-  group_by(processor) %>%
+execution %>%
+  group_by(pe_id) %>%
   summarise(
-    total_time = sum(duration),
-    event_count = n(),
-    avg_duration = mean(duration)
+    total_us  = sum(wall_duration_us),
+    events    = n(),
+    mean_us   = mean(wall_duration_us)
   )
-
-# Create visualizations
-ggplot(timeline, aes(x = begin_time, y = processor, color = entry_point)) +
-  geom_segment(aes(xend = end_time, yend = processor)) +
-  theme_minimal() +
-  labs(title = "Timeline Visualization")
 #+end_src
+
+*** PAPI counters
+
+When the trace was collected with PAPI active, ~execution.parquet~ carries six fixed counter columns per direction (~papi_begin_0..5~, ~papi_end_0..5~, ~papi_delta_0..5~). The columns stay numerically indexed; the counter *names* live in the file's Arrow schema metadata, so consumers never have to introspect the schema before querying:
+
+#+begin_src python
+import pyarrow.parquet as pq
+
+meta = pq.read_schema("out/execution.parquet").metadata
+print(meta[b"papi_event_0"])   # e.g. b'PAPI_L2_TCM'
+#+end_src
+
+** charmvz-viz
+
+The [[file:charmvz-viz/][charmvz-viz]] subdirectory is a separate Python package (~charmvz_vis~) that reads the output directory and provides analysis and plotting APIs modelled on the Projections views -- time profile, usage profile, entry-point profile, histograms, per-PE communication, and extrema analysis.
+
+#+begin_src python
+import charmvz_vis as cv
+
+ds = cv.TraceDataset("out/")
+cv.time_profile(ds)
+cv.usage_profile(ds)
+#+end_src
+
+See [[file:charmvz-viz/README.org][charmvz-viz/README.org]] for setup and the full API.
 
 ** Architecture
 
-CharmVZ implements the same core algorithms as Projections but optimized for batch processing:
+A four-stage pipeline, orchestrated in ~src/main.cpp~. Logs are never read into memory in full.
 
-*** Performance Optimizations
+| Stage | Work |
+|-------+------|
+| 1 | Parse ~.sts~ and ~.projrc~; write the metadata tables; resolve the step-boundary event |
+| 2 | Stream each PE log; emit Execution, IdleInterval, ChareInstance and UserEvent rows |
+| 3+4 | Cross-PE reconstruction: message linkage, migrations, timestep folding, timestamp alignment |
 
-- *Streaming processing*: Events are processed as they're read from disk
-- *Memory efficient*: Only active timeline events are kept in memory
-- *Compressed I/O*: Direct reading of .gz files without decompression
-- *Minimal copying*: Move semantics used throughout for large data structures
+Stage 2 is where the volume is. Arrow column builders flush a row group every 100,000 rows, so memory stays flat regardless of trace size.
+
+Some details that are easy to get wrong and are handled deliberately:
+
+- A chare array writes exactly ~ndims~ index values, not a fixed four. Reading four consumes an unrelated field as an index for 3-D arrays and under-reads 6-D ones.
+- Migrations are derived from PE transitions between consecutive executions of an element. Pack/unpack events are message serialization, not migration, and ~CkLocMgr::emigrate()~ emits no tracing at all -- so a migration has no directly measurable cost in a trace.
+- Message linkage matches on ~(src_pe, event)~, never on the event serial alone, which is only unique per PE.
+- Bracketed user events carry a ~pe~ field that is always 0, so they are attributed to the PE that owns the log file.
+
+** Testing
+
+#+begin_src bash
+meson test -C builddir-rel
+#+end_src
+
+Catch2 suites live in ~tests/~, one file per unit (~test_sts_parser~, ~test_parquet_writer~, ~test_log_parser~). To add one, create ~tests/test_<unit>.cpp~ and append the unit name to the ~foreach~ list in ~meson.build~.
+
+New tests are expected to be *mutation-checked*: revert the behaviour a test guards and confirm the test fails. A test that still passes against the broken version is not testing what it claims to.
 
 ** Contributing
 
-Contributions are welcome!
-
-*** Development Setup
-
 #+begin_src bash
-# Install development dependencies
-meson setup build --buildtype=debug
-
-# Run tests with coverage
-meson test -C build
-
-# Format code
-clang-format -i src/**/*.cpp src/**/*.h
+just compile-debug              # ASan + UBSan build
+meson test -C builddir-deb
+clang-format -i src/*.cpp src/*.h src/utils/* tests/*.cpp
 #+end_src
 
 ** License
@@ -196,15 +269,14 @@ See [[file:LICENSE][LICENSE]] for details.
 
 ** Acknowledgments
 
-- *Projections Team*: For the original algorithms and trace format specifications
-- *Charm++ Team*: For the runtime tracing infrastructure
+- *Projections Team*: for the original algorithms and trace format
+- *Charm++ Team*: for the runtime tracing infrastructure
 
 ** Related Projects
 
-- [[https://github.com/charmplusplus/projections][Projections]]: Interactive GUI-based visualization tool
-- [[https://github.com/UIUC-PPL/charm][Charm++]]: Parallel programming framework
-- [[https://github.com/LLNL/TraceR][TraceR]]: Trace replay framework for HPC applications
+- [[https://github.com/charmplusplus/projections][Projections]]: interactive GUI-based visualization tool
+- [[https://github.com/UIUC-PPL/charm][Charm++]]: parallel programming framework
 
 ** Support
 
-- *Issues*: Report bugs and feature requests via [[https://github.com/caschb/charmvz-cpp/issues][GitHub Issues]]
+- *Issues*: report bugs and feature requests via [[https://github.com/caschb/charmvz-cpp/issues][GitHub Issues]]
