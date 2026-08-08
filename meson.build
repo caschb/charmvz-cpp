@@ -65,14 +65,14 @@ executable(
 # Tests are skipped when Catch2 is not installed, so a plain build never
 # requires it.
 if catch2_dep.found()
-    foreach unit : ['sts_parser', 'parquet_writer', 'log_parser']
+    foreach unit : ['sts_parser', 'parquet_writer', 'log_parser', 'chare_index', 'migration']
         test(
             unit,
             executable(
                 'test_' + unit,
                 'tests/test_' + unit + '.cpp',
                 link_with: charmvz_lib,
-                include_directories: include_directories('src'),
+                include_directories: include_directories('src', 'tests'),
                 dependencies: test_deps,
             ),
         )
