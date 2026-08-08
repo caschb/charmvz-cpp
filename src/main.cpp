@@ -17,6 +17,10 @@ auto main(int argc, char **argv) -> int {
   spdlog::cfg::load_env_levels();
   std::filesystem::path logs_path;
   std::filesystem::path out_path;
+  // The name the application passed to traceRegisterUserEvent() for the
+  // bracketed event that delimits one timestep. Configurable because the name
+  // is the application's choice, not the runtime's.
+  std::string step_event_name = "SimulationStep";
 
   try {
     CLI::App app{"Parser for Charm++ files to Apache Arrow"};
@@ -25,6 +29,10 @@ auto main(int argc, char **argv) -> int {
         ->check(CLI::ExistingDirectory);
     app.add_option("-o,--output", out_path, "Output Directory Path")
         ->required();
+    app.add_option("-s,--step-event", step_event_name,
+                   "Name of the registered bracketed user event that delimits "
+                   "a timestep; its nestedID carries the step index")
+        ->capture_default_str();
     CLI11_PARSE(app, argc, argv);
   } catch (const std::exception &e) {
     spdlog::error("Error: {}", e.what());
@@ -100,13 +108,44 @@ auto main(int argc, char **argv) -> int {
     ep_writer.WriteBatch(batch);
   }
 
+  if (!sts_data.messages.empty()) {
+    charmvz::ParquetWriter msg_type_writer(charmvz::schema::message_type(),
+                                           out_path.string() +
+                                               "/message_type.parquet");
+    arrow::Int32Builder mt_idx;
+    arrow::Int64Builder mt_size;
+    for (const auto &m : sts_data.messages) {
+      PARQUET_THROW_NOT_OK(mt_idx.Append(m.msg_idx));
+      PARQUET_THROW_NOT_OK(mt_size.Append(static_cast<int64_t>(m.size)));
+    }
+    std::shared_ptr<arrow::Array> a_mt_idx, a_mt_size;
+    PARQUET_THROW_NOT_OK(mt_idx.Finish(&a_mt_idx));
+    PARQUET_THROW_NOT_OK(mt_size.Finish(&a_mt_size));
+    auto batch =
+        arrow::RecordBatch::Make(charmvz::schema::message_type(),
+                                 a_mt_idx->length(), {a_mt_idx, a_mt_size});
+    msg_type_writer.WriteBatch(batch);
+  }
+
+  const int32_t step_event_id =
+      charmvz::find_user_event_id(sts_data, step_event_name);
+  if (step_event_id == charmvz::NO_STEP_EVENT) {
+    spdlog::info("No user event named \"{}\" is registered in the STS file; "
+                 "no timesteps will be reconstructed",
+                 step_event_name);
+  } else {
+    spdlog::info("Reconstructing timesteps from user event {} (\"{}\")",
+                 step_event_id, step_event_name);
+  }
+
   // Stage 2
-  auto log_result =
-      charmvz::process_logs(traces_paths, sts_data, rc_data, out_path.string());
+  auto log_result = charmvz::process_logs(traces_paths, sts_data, rc_data,
+                                          out_path.string(), step_event_id);
 
   // Stage 3 & 4
   charmvz::reconstruct_message_and_migration(log_result, sts_data, rc_data,
                                              out_path.string());
+  charmvz::reconstruct_simulation_steps(log_result, out_path.string());
 
   spdlog::info("Pipeline successfully finished.");
   return 0;

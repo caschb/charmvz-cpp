@@ -212,4 +212,72 @@ void ChareInstanceBuilder::Flush() {
   writer_.WriteBatch(batch);
 }
 
+UserEventBuilder::UserEventBuilder(ParquetWriter &writer)
+    : writer_(writer), schema_(charmvz::schema::user_event()) {}
+
+void UserEventBuilder::Append(const UserEventOccurrence &occurrence) {
+  PARQUET_THROW_NOT_OK(pe_id.Append(occurrence.pe_id));
+  PARQUET_THROW_NOT_OK(record_type.Append(occurrence.record_type));
+
+  auto append_optional_int32 = [](arrow::Int32Builder &builder, bool present,
+                                  int32_t value) {
+    if (present) {
+      PARQUET_THROW_NOT_OK(builder.Append(value));
+    } else {
+      PARQUET_THROW_NOT_OK(builder.AppendNull());
+    }
+  };
+
+  append_optional_int32(user_event_id, occurrence.has_user_event_id,
+                        occurrence.user_event_id);
+  if (occurrence.has_name) {
+    PARQUET_THROW_NOT_OK(name.Append(occurrence.name));
+  } else {
+    PARQUET_THROW_NOT_OK(name.AppendNull());
+  }
+  append_optional_int32(event, occurrence.has_event, occurrence.event);
+  append_optional_int32(nested_id, occurrence.has_nested_id,
+                        occurrence.nested_id);
+
+  PARQUET_THROW_NOT_OK(start_time_us.Append(occurrence.start_time_us));
+  if (occurrence.has_end_time) {
+    PARQUET_THROW_NOT_OK(end_time_us.Append(occurrence.end_time_us));
+    PARQUET_THROW_NOT_OK(
+        duration_us.Append(occurrence.end_time_us - occurrence.start_time_us));
+  } else {
+    PARQUET_THROW_NOT_OK(end_time_us.AppendNull());
+    PARQUET_THROW_NOT_OK(duration_us.AppendNull());
+  }
+
+  append_optional_int32(user_supplied_int, occurrence.has_user_supplied_int,
+                        occurrence.user_supplied_int);
+  if (occurrence.has_note) {
+    PARQUET_THROW_NOT_OK(note.Append(occurrence.note));
+  } else {
+    PARQUET_THROW_NOT_OK(note.AppendNull());
+  }
+
+  TryFlush();
+}
+
+void UserEventBuilder::Flush() {
+  if (pe_id.length() == 0)
+    return;
+  std::vector<std::shared_ptr<arrow::Array>> arrays(11);
+  PARQUET_THROW_NOT_OK(pe_id.Finish(&arrays[0]));
+  PARQUET_THROW_NOT_OK(record_type.Finish(&arrays[1]));
+  PARQUET_THROW_NOT_OK(user_event_id.Finish(&arrays[2]));
+  PARQUET_THROW_NOT_OK(name.Finish(&arrays[3]));
+  PARQUET_THROW_NOT_OK(event.Finish(&arrays[4]));
+  PARQUET_THROW_NOT_OK(nested_id.Finish(&arrays[5]));
+  PARQUET_THROW_NOT_OK(start_time_us.Finish(&arrays[6]));
+  PARQUET_THROW_NOT_OK(end_time_us.Finish(&arrays[7]));
+  PARQUET_THROW_NOT_OK(duration_us.Finish(&arrays[8]));
+  PARQUET_THROW_NOT_OK(user_supplied_int.Finish(&arrays[9]));
+  PARQUET_THROW_NOT_OK(note.Finish(&arrays[10]));
+
+  auto batch = arrow::RecordBatch::Make(schema_, arrays[0]->length(), arrays);
+  writer_.WriteBatch(batch);
+}
+
 } // namespace charmvz::builders

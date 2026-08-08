@@ -80,6 +80,41 @@ struct BeginProcessingRecord {
   int64_t exec_start_time_us;
 };
 
+// One user-event occurrence, ready to be written to user_event.parquet. Every
+// optional field carries an explicit `has_*` flag rather than a sentinel,
+// because 0 and -1 are both legitimate values for `nested_id`, `event` and
+// `user_supplied_int`.
+struct UserEventOccurrence {
+  int32_t pe_id;
+  int32_t record_type;
+  int32_t user_event_id;
+  bool has_user_event_id;
+  std::string name;
+  bool has_name;
+  int32_t event;
+  bool has_event;
+  int32_t nested_id;
+  bool has_nested_id;
+  int64_t start_time_us;
+  int64_t end_time_us;
+  bool has_end_time;
+  int32_t user_supplied_int;
+  bool has_user_supplied_int;
+  std::string note;
+  bool has_note;
+};
+
+// One PE's occupancy of one timestep, derived from a matched pair of
+// step-boundary user events. `end_time_us` is absent when the log ends inside
+// the step, which happens if tracing stops mid-run.
+struct StepBoundaryRecord {
+  int32_t step_id;
+  int32_t pe_id;
+  int64_t start_time_us;
+  int64_t end_time_us;
+  bool has_end_time;
+};
+
 struct LogParserResult {
   std::unordered_map<std::tuple<int32_t, int32_t>, CreationRecord, TupleHash>
       creation_map;
@@ -94,10 +129,19 @@ struct LogParserResult {
   std::unordered_map<std::tuple<int32_t, int32_t>, BeginProcessingRecord,
                      TupleHash>
       begin_processing_map;
+  // Empty unless a step-boundary user event was configured and found. Small by
+  // construction -- one entry per (timestep, PE) -- so it is accumulated in
+  // memory rather than streamed.
+  std::vector<StepBoundaryRecord> step_boundaries;
 };
+
+// `step_event_id` selects the registered user event whose brackets delimit a
+// timestep; pass NO_STEP_EVENT to skip step reconstruction entirely.
+constexpr int32_t NO_STEP_EVENT = -1;
 
 auto process_logs(const std::vector<std::string> &log_file_paths,
                   const StsData &sts_data, const RcData &rc_data,
-                  const std::string &output_dir) -> LogParserResult;
+                  const std::string &output_dir,
+                  int32_t step_event_id = NO_STEP_EVENT) -> LogParserResult;
 
 } // namespace charmvz

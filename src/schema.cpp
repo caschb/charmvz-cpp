@@ -148,4 +148,59 @@ auto migration_episode() -> std::shared_ptr<arrow::Schema> {
        arrow::field("migration_seq", arrow::int32(), false)});
 }
 
+// One row per user-event occurrence, covering both the instantaneous forms
+// (USER_EVENT 13, USER_SUPPLIED 26, USER_SUPPLIED_NOTE 28) and the bracketed
+// ones (USER_SUPPLIED_BRACKETED_NOTE 29, BEGIN/END_USER_EVENT_PAIR 98/99,
+// USER_EVENT_PAIR 100). `record_type` keeps the originating Charm++ type code
+// so a consumer can tell the forms apart without reverse-engineering which
+// columns happen to be NULL.
+//
+// `pe_id` comes from the log file name, never from the record's own `pe` field:
+// the bracketed forms are constructed by a LogEntry constructor that never sets
+// `pe` (trace-projections.h:179-185), so they carry a literal 0 on every PE.
+auto user_event() -> std::shared_ptr<arrow::Schema> {
+  return arrow::schema({arrow::field("pe_id", arrow::int32(), false),
+                        arrow::field("record_type", arrow::int32(), false),
+                        arrow::field("user_event_id", arrow::int32(), true),
+                        arrow::field("name", arrow::utf8(), true),
+                        arrow::field("event", arrow::int32(), true),
+                        arrow::field("nested_id", arrow::int32(), true),
+                        arrow::field("start_time_us", arrow::int64(), false),
+                        arrow::field("end_time_us", arrow::int64(), true),
+                        arrow::field("duration_us", arrow::int64(), true),
+                        arrow::field("user_supplied_int", arrow::int32(), true),
+                        arrow::field("note", arrow::utf8(), true)});
+}
+
+// A timestep of the traced application, as delimited on one PE by a bracketed
+// user event whose registered STS name matches the configured step-boundary
+// event. The step index is the bracket's `nestedID` -- the only application
+// supplied integer a bracketed user event carries.
+//
+// The grain is (step_id, pe_id) rather than step alone because that is what
+// attribution needs: an Execution belongs to the step whose interval *on its
+// own PE* contains it. PEs do not enter and leave a step together, so a single
+// global interval per step would overlap its neighbours and make the
+// attribution ambiguous. The global extent is denormalized into every row
+// instead, the same way ProcessingElement carries `global_start_us`.
+auto simulation_step() -> std::shared_ptr<arrow::Schema> {
+  return arrow::schema(
+      {arrow::field("step_id", arrow::int32(), false),
+       arrow::field("pe_id", arrow::int32(), false),
+       arrow::field("start_time_us", arrow::int64(), false),
+       arrow::field("end_time_us", arrow::int64(), true),
+       arrow::field("duration_us", arrow::int64(), true),
+       arrow::field("global_start_time_us", arrow::int64(), false),
+       arrow::field("global_end_time_us", arrow::int64(), true),
+       arrow::field("pe_count", arrow::int32(), false)});
+}
+
+// Lookup for the STS `MESSAGE <msgIdx> <size>` table, which gives the declared
+// size of each message type referenced by Execution.msg_idx and
+// Message.msg_idx.
+auto message_type() -> std::shared_ptr<arrow::Schema> {
+  return arrow::schema({arrow::field("msg_idx", arrow::int32(), false),
+                        arrow::field("size_bytes", arrow::int64(), false)});
+}
+
 } // namespace charmvz::schema

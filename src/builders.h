@@ -106,4 +106,31 @@ private:
   arrow::Int32Builder index_5;
 };
 
+class UserEventBuilder {
+public:
+  UserEventBuilder(ParquetWriter &writer);
+  void Append(const UserEventOccurrence &occurrence);
+  void Flush();
+  void TryFlush() {
+    if (pe_id.length() >= ROW_GROUP_SIZE)
+      Flush();
+  }
+
+private:
+  ParquetWriter &writer_;
+  std::shared_ptr<arrow::Schema> schema_;
+
+  arrow::Int32Builder pe_id;
+  arrow::Int32Builder record_type;
+  arrow::Int32Builder user_event_id;
+  arrow::StringBuilder name;
+  arrow::Int32Builder event;
+  arrow::Int32Builder nested_id;
+  arrow::Int64Builder start_time_us;
+  arrow::Int64Builder end_time_us;
+  arrow::Int64Builder duration_us;
+  arrow::Int32Builder user_supplied_int;
+  arrow::StringBuilder note;
+};
+
 } // namespace charmvz::builders

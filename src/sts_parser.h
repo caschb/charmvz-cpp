@@ -63,4 +63,12 @@ struct StsData {
 
 auto parse_sts_file(const std::string_view sts_file_path) -> StsData;
 
+// Resolves a registered user event by the name the application passed to
+// traceRegisterUserEvent(). Returns -1 when no EVENT record carries that name.
+// Names are compared exactly, including interior spaces: the STS EVENT line is
+// `EVENT <id> <name>` with the name running to end of line, so multi-word names
+// such as "Particle interaction" are ordinary.
+auto find_user_event_id(const StsData &sts_data, std::string_view name)
+    -> int32_t;
+
 } // namespace charmvz

@@ -133,4 +133,14 @@ auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
   return data;
 }
 
+auto find_user_event_id(const StsData &sts_data, std::string_view name)
+    -> int32_t {
+  for (const auto &user_event : sts_data.user_events) {
+    if (user_event.name == name) {
+      return user_event.event_id;
+    }
+  }
+  return -1;
+}
+
 } // namespace charmvz

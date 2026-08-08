@@ -68,6 +68,17 @@ struct LogEntry {
   uint64_t papiValues[NUMPAPIEVENTS];
   int32_t numpes;
   std::vector<int32_t> pes;
+  // End timestamp of a self-contained bracketed record
+  // (USER_SUPPLIED_BRACKETED_NOTE).
+  uint64_t iEndTime;
+  // Application-supplied nesting id carried by the bracketed user-event forms
+  // (codes 98, 99, 100). By the convention this pipeline consumes it also
+  // carries the timestep index -- see schema::simulation_step().
+  int32_t nestedID;
+  // The integer datum of a USER_SUPPLIED record.
+  int32_t userSuppliedData;
+  // The text of a USER_SUPPLIED_NOTE / USER_SUPPLIED_BRACKETED_NOTE record.
+  std::string userSuppliedNote;
 };
 
 auto to_string(const LogType &type) -> const char *;

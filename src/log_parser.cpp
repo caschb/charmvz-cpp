@@ -42,11 +42,41 @@ auto is_chare_array(const StsData &sts_data, int32_t collection_id) -> bool {
   return chare_it != sts_data.chare_map.end() && chare_it->second.ndims >= 1;
 }
 
+// Reads a std::string as the Projections text pup-er writes it: a decimal
+// length, then exactly that many characters with no separator between them.
+// `toProjectionsFile::bytes` emits Tchar as "%c"
+// (charm/src/ck-perf/trace-projections.C:1527), so the characters begin
+// immediately after the length's digits and must be read *without* skipping
+// whitespace -- a note may legitimately start with a space.
+auto read_pup_string(std::istringstream &iss) -> std::string {
+  size_t length = 0;
+  iss >> length;
+  if (!iss) {
+    return {};
+  }
+  std::string value(length, '\0');
+  iss.read(value.data(), static_cast<std::streamsize>(length));
+  value.resize(static_cast<size_t>(iss.gcount()));
+  return value;
+}
+
+// Fills in the registered name of a user event, when the STS EVENT table
+// declares one. Applications may emit ids they never registered.
+void attach_user_event_name(const StsData &sts_data,
+                            UserEventOccurrence &occurrence) {
+  auto name_it = sts_data.user_event_map.find(occurrence.user_event_id);
+  if (name_it != sts_data.user_event_map.end()) {
+    occurrence.name = name_it->second.name;
+    occurrence.has_name = true;
+  }
+}
+
 } // namespace
 
 auto process_logs(const std::vector<std::string> &log_file_paths,
                   const StsData &sts_data, const RcData &rc_data,
-                  const std::string &output_dir) -> LogParserResult {
+                  const std::string &output_dir, int32_t step_event_id)
+    -> LogParserResult {
   LogParserResult result;
 
   auto exec_schema = charmvz::schema::execution(sts_data.papi_event_names);
@@ -56,11 +86,16 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                                      output_dir + "/idle_interval.parquet");
   charmvz::ParquetWriter chare_writer(charmvz::schema::chare_instance(),
                                       output_dir + "/chare_instance.parquet");
+  charmvz::ParquetWriter user_event_writer(charmvz::schema::user_event(),
+                                           output_dir + "/user_event.parquet");
 
   builders::ExecutionBuilder exec_builder(exec_writer, exec_schema,
                                           sts_data.total_papi_events);
   builders::IdleIntervalBuilder idle_builder(idle_writer);
   builders::ChareInstanceBuilder chare_builder(chare_writer);
+  builders::UserEventBuilder user_event_builder(user_event_writer);
+
+  const int64_t global_start_us = rc_data.global_start_time_us;
 
   for (const auto &log_path : log_file_paths) {
     spdlog::info("Processing log: {}", log_path);
@@ -79,6 +114,48 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
 
     LogEntry last_begin_idle{};
     std::unordered_map<int32_t, LogEntry> open_processing_entries;
+
+    // USER_EVENT_PAIR writes its begin and its end as two records sharing one
+    // `event` serial (trace-projections.C:1093-1096), so they pair on that.
+    std::unordered_map<int32_t, LogEntry> open_event_pairs;
+    // BEGIN_/END_USER_EVENT_PAIR consume a fresh serial each
+    // (trace-projections.C:1102,1109), so they cannot pair on `event`. They
+    // pair on (user event id, nestedID), which is precisely what nestedID
+    // exists for; the vector is a stack so identically-keyed brackets can nest.
+    std::unordered_map<std::tuple<int32_t, int32_t>, std::vector<LogEntry>,
+                       TupleHash>
+        open_brackets;
+
+    // Emits one row for a bracketed user event, and records a timestep
+    // boundary when the bracket is the configured step-boundary event.
+    auto emit_bracket = [&](int32_t record_type, int32_t user_event_id,
+                            int32_t event, int32_t nested_id, int64_t start_us,
+                            int64_t end_us, bool has_end) {
+      UserEventOccurrence occurrence{};
+      occurrence.pe_id = current_pe_id;
+      occurrence.record_type = record_type;
+      occurrence.user_event_id = user_event_id;
+      occurrence.has_user_event_id = true;
+      occurrence.event = event;
+      occurrence.has_event = true;
+      occurrence.nested_id = nested_id;
+      occurrence.has_nested_id = true;
+      occurrence.start_time_us = start_us;
+      occurrence.end_time_us = end_us;
+      occurrence.has_end_time = has_end;
+      attach_user_event_name(sts_data, occurrence);
+      user_event_builder.Append(occurrence);
+
+      if (step_event_id != NO_STEP_EVENT && user_event_id == step_event_id) {
+        StepBoundaryRecord step{};
+        step.step_id = nested_id;
+        step.pe_id = current_pe_id;
+        step.start_time_us = start_us;
+        step.end_time_us = end_us;
+        step.has_end_time = has_end;
+        result.step_boundaries.push_back(step);
+      }
+    };
 
     while (std::getline(log_stream, line)) {
       if (line.empty())
@@ -257,8 +334,138 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         }
         break;
       }
+      case LogType::USER_EVENT: {
+        iss >> e.mIdx >> e.itime >> e.event >> e.pe;
+        UserEventOccurrence occurrence{};
+        occurrence.pe_id = current_pe_id;
+        occurrence.record_type = static_cast<int32_t>(type);
+        occurrence.user_event_id = e.mIdx;
+        occurrence.has_user_event_id = true;
+        occurrence.event = e.event;
+        occurrence.has_event = true;
+        occurrence.start_time_us =
+            static_cast<int64_t>(e.itime) - global_start_us;
+        attach_user_event_name(sts_data, occurrence);
+        user_event_builder.Append(occurrence);
+        break;
+      }
+      case LogType::USER_SUPPLIED: {
+        iss >> e.userSuppliedData >> e.itime;
+        UserEventOccurrence occurrence{};
+        occurrence.pe_id = current_pe_id;
+        occurrence.record_type = static_cast<int32_t>(type);
+        occurrence.start_time_us =
+            static_cast<int64_t>(e.itime) - global_start_us;
+        occurrence.user_supplied_int = e.userSuppliedData;
+        occurrence.has_user_supplied_int = true;
+        user_event_builder.Append(occurrence);
+        break;
+      }
+      case LogType::USER_SUPPLIED_NOTE: {
+        iss >> e.itime;
+        e.userSuppliedNote = read_pup_string(iss);
+        UserEventOccurrence occurrence{};
+        occurrence.pe_id = current_pe_id;
+        occurrence.record_type = static_cast<int32_t>(type);
+        occurrence.start_time_us =
+            static_cast<int64_t>(e.itime) - global_start_us;
+        occurrence.note = e.userSuppliedNote;
+        occurrence.has_note = true;
+        user_event_builder.Append(occurrence);
+        break;
+      }
+      case LogType::USER_SUPPLIED_BRACKETED_NOTE: {
+        iss >> e.itime >> e.iEndTime >> e.event;
+        e.userSuppliedNote = read_pup_string(iss);
+        UserEventOccurrence occurrence{};
+        occurrence.pe_id = current_pe_id;
+        occurrence.record_type = static_cast<int32_t>(type);
+        occurrence.event = e.event;
+        occurrence.has_event = true;
+        occurrence.start_time_us =
+            static_cast<int64_t>(e.itime) - global_start_us;
+        occurrence.end_time_us =
+            static_cast<int64_t>(e.iEndTime) - global_start_us;
+        occurrence.has_end_time = true;
+        occurrence.note = e.userSuppliedNote;
+        occurrence.has_note = true;
+        user_event_builder.Append(occurrence);
+        break;
+      }
+      case LogType::USER_EVENT_PAIR: {
+        // The record's own `pe` field is meaningless for the bracketed forms
+        // -- their LogEntry constructor never assigns it, so it is 0 on every
+        // PE. Attribution uses the PE the log file belongs to.
+        iss >> e.mIdx >> e.itime >> e.event >> e.pe >> e.nestedID;
+        auto open_it = open_event_pairs.find(e.event);
+        if (open_it == open_event_pairs.end()) {
+          open_event_pairs[e.event] = e;
+          break;
+        }
+        const LogEntry &begin = open_it->second;
+        emit_bracket(static_cast<int32_t>(type), begin.mIdx, begin.event,
+                     begin.nestedID,
+                     static_cast<int64_t>(begin.itime) - global_start_us,
+                     static_cast<int64_t>(e.itime) - global_start_us, true);
+        open_event_pairs.erase(open_it);
+        break;
+      }
+      case LogType::BEGIN_USER_EVENT_PAIR: {
+        iss >> e.mIdx >> e.itime >> e.event >> e.pe >> e.nestedID;
+        open_brackets[std::make_tuple(static_cast<int32_t>(e.mIdx), e.nestedID)]
+            .push_back(e);
+        break;
+      }
+      case LogType::END_USER_EVENT_PAIR: {
+        iss >> e.mIdx >> e.itime >> e.event >> e.pe >> e.nestedID;
+        auto key = std::make_tuple(static_cast<int32_t>(e.mIdx), e.nestedID);
+        auto open_it = open_brackets.find(key);
+        if (open_it == open_brackets.end() || open_it->second.empty()) {
+          // An END with no BEGIN: tracing was switched on mid-bracket, or the
+          // application is unbalanced. Keep it as a zero-width occurrence
+          // rather than silently dropping the evidence.
+          spdlog::warn("END_USER_EVENT_PAIR with no open bracket for user "
+                       "event {} (nestedID {}) on PE {}",
+                       e.mIdx, e.nestedID, current_pe_id);
+          emit_bracket(static_cast<int32_t>(type), e.mIdx, e.event, e.nestedID,
+                       static_cast<int64_t>(e.itime) - global_start_us, 0,
+                       false);
+          break;
+        }
+        const LogEntry begin = open_it->second.back();
+        open_it->second.pop_back();
+        emit_bracket(static_cast<int32_t>(LogType::BEGIN_USER_EVENT_PAIR),
+                     begin.mIdx, begin.event, begin.nestedID,
+                     static_cast<int64_t>(begin.itime) - global_start_us,
+                     static_cast<int64_t>(e.itime) - global_start_us, true);
+        break;
+      }
       default:
         break;
+      }
+    }
+
+    // Brackets still open at end of file: the run was cut short, or tracing
+    // ended inside the bracket. Emit them with no end timestamp so the
+    // occurrence is still visible.
+    for (const auto &[event_serial, begin] : open_event_pairs) {
+      spdlog::warn("Unmatched USER_EVENT_PAIR record for event serial {} on "
+                   "PE {}",
+                   event_serial, current_pe_id);
+      emit_bracket(static_cast<int32_t>(LogType::USER_EVENT_PAIR), begin.mIdx,
+                   begin.event, begin.nestedID,
+                   static_cast<int64_t>(begin.itime) - global_start_us, 0,
+                   false);
+    }
+    for (const auto &[key, stack] : open_brackets) {
+      for (const auto &begin : stack) {
+        spdlog::warn("Unclosed BEGIN_USER_EVENT_PAIR for user event {} "
+                     "(nestedID {}) on PE {}",
+                     std::get<0>(key), std::get<1>(key), current_pe_id);
+        emit_bracket(static_cast<int32_t>(LogType::BEGIN_USER_EVENT_PAIR),
+                     begin.mIdx, begin.event, begin.nestedID,
+                     static_cast<int64_t>(begin.itime) - global_start_us, 0,
+                     false);
       }
     }
   }
@@ -266,6 +473,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
   exec_builder.Flush();
   idle_builder.Flush();
   chare_builder.Flush();
+  user_event_builder.Flush();
 
   return result;
 }

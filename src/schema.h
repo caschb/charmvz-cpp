@@ -48,4 +48,19 @@ auto idle_interval() -> std::shared_ptr<arrow::Schema>;
  */
 auto migration_episode() -> std::shared_ptr<arrow::Schema>;
 
+/**
+ * Returns the formal Arrow schema for the UserEvent entity.
+ */
+auto user_event() -> std::shared_ptr<arrow::Schema>;
+
+/**
+ * Returns the formal Arrow schema for the SimulationStep entity.
+ */
+auto simulation_step() -> std::shared_ptr<arrow::Schema>;
+
+/**
+ * Returns the formal Arrow schema for the MessageType lookup table.
+ */
+auto message_type() -> std::shared_ptr<arrow::Schema>;
+
 } // namespace charmvz::schema

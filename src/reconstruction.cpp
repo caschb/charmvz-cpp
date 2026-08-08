@@ -3,8 +3,10 @@
 #include "schema.h"
 #include <algorithm>
 #include <arrow/builder.h>
+#include <map>
 #include <spdlog/spdlog.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace charmvz {
@@ -198,6 +200,114 @@ void reconstruct_message_and_migration(const LogParserResult &log_data,
                                           arrays[0]->length(), arrays);
     mig_writer.WriteBatch(batch);
   }
+}
+
+void reconstruct_simulation_steps(const LogParserResult &log_data,
+                                  const std::string &output_dir) {
+  ParquetWriter step_writer(charmvz::schema::simulation_step(),
+                            output_dir + "/simulation_step.parquet");
+
+  if (log_data.step_boundaries.empty()) {
+    spdlog::info("No step-boundary user events found; "
+                 "simulation_step.parquet will be empty");
+    return;
+  }
+
+  // A PE may bracket the same step more than once if the application reuses
+  // the boundary event within a step. Fold those into one interval per
+  // (step, PE) rather than emitting duplicate primary keys.
+  struct StepExtent {
+    int64_t start_us;
+    int64_t end_us;
+    bool has_end;
+  };
+  std::map<std::pair<int32_t, int32_t>, StepExtent> per_pe;
+
+  for (const auto &boundary : log_data.step_boundaries) {
+    auto key = std::make_pair(boundary.step_id, boundary.pe_id);
+    auto [it, inserted] = per_pe.try_emplace(
+        key, StepExtent{boundary.start_time_us, boundary.end_time_us,
+                        boundary.has_end_time});
+    if (inserted) {
+      continue;
+    }
+    it->second.start_us = std::min(it->second.start_us, boundary.start_time_us);
+    if (boundary.has_end_time) {
+      it->second.end_us =
+          it->second.has_end ? std::max(it->second.end_us, boundary.end_time_us)
+                             : boundary.end_time_us;
+      it->second.has_end = true;
+    }
+  }
+
+  // The global extent of a step is the union of its per-PE intervals. It is
+  // denormalized into every row so a consumer gets the whole-run view without
+  // a second aggregation, exactly as ProcessingElement carries global_start_us.
+  struct GlobalExtent {
+    int64_t start_us;
+    int64_t end_us;
+    bool has_end;
+    int32_t pe_count;
+  };
+  std::map<int32_t, GlobalExtent> per_step;
+
+  for (const auto &[key, extent] : per_pe) {
+    auto [it, inserted] = per_step.try_emplace(
+        key.first,
+        GlobalExtent{extent.start_us, extent.end_us, extent.has_end, 1});
+    if (inserted) {
+      continue;
+    }
+    it->second.start_us = std::min(it->second.start_us, extent.start_us);
+    if (extent.has_end) {
+      it->second.end_us = it->second.has_end
+                              ? std::max(it->second.end_us, extent.end_us)
+                              : extent.end_us;
+      it->second.has_end = true;
+    }
+    ++it->second.pe_count;
+  }
+
+  arrow::Int32Builder step_id, pe_id, pe_count;
+  arrow::Int64Builder start_us, end_us, duration_us, global_start_us,
+      global_end_us;
+
+  for (const auto &[key, extent] : per_pe) {
+    const auto &global = per_step.at(key.first);
+    PARQUET_THROW_NOT_OK(step_id.Append(key.first));
+    PARQUET_THROW_NOT_OK(pe_id.Append(key.second));
+    PARQUET_THROW_NOT_OK(start_us.Append(extent.start_us));
+    if (extent.has_end) {
+      PARQUET_THROW_NOT_OK(end_us.Append(extent.end_us));
+      PARQUET_THROW_NOT_OK(duration_us.Append(extent.end_us - extent.start_us));
+    } else {
+      PARQUET_THROW_NOT_OK(end_us.AppendNull());
+      PARQUET_THROW_NOT_OK(duration_us.AppendNull());
+    }
+    PARQUET_THROW_NOT_OK(global_start_us.Append(global.start_us));
+    if (global.has_end) {
+      PARQUET_THROW_NOT_OK(global_end_us.Append(global.end_us));
+    } else {
+      PARQUET_THROW_NOT_OK(global_end_us.AppendNull());
+    }
+    PARQUET_THROW_NOT_OK(pe_count.Append(global.pe_count));
+  }
+
+  std::vector<std::shared_ptr<arrow::Array>> arrays(8);
+  PARQUET_THROW_NOT_OK(step_id.Finish(&arrays[0]));
+  PARQUET_THROW_NOT_OK(pe_id.Finish(&arrays[1]));
+  PARQUET_THROW_NOT_OK(start_us.Finish(&arrays[2]));
+  PARQUET_THROW_NOT_OK(end_us.Finish(&arrays[3]));
+  PARQUET_THROW_NOT_OK(duration_us.Finish(&arrays[4]));
+  PARQUET_THROW_NOT_OK(global_start_us.Finish(&arrays[5]));
+  PARQUET_THROW_NOT_OK(global_end_us.Finish(&arrays[6]));
+  PARQUET_THROW_NOT_OK(pe_count.Finish(&arrays[7]));
+
+  auto batch = arrow::RecordBatch::Make(charmvz::schema::simulation_step(),
+                                        arrays[0]->length(), arrays);
+  step_writer.WriteBatch(batch);
+  spdlog::info("Wrote {} simulation_step rows across {} timesteps",
+               per_pe.size(), per_step.size());
 }
 
 } // namespace charmvz
