@@ -12,7 +12,13 @@ Quick start::
 """
 
 # Analysis functions
-from .analysis import load_imbalance_score, per_interval_utilization, per_pe_utilization
+from .analysis import (
+    load_imbalance_score,
+    noise_miner,
+    noise_occurrences,
+    per_interval_utilization,
+    per_pe_utilization,
+)
 from .dataset import TraceDataset
 
 # Plot functions — Phase 1
@@ -25,6 +31,7 @@ from .plots import (
     execution_time_histogram,
     extrema_analysis,
     message_size_histogram,
+    noise_timeline,
     paper_percent_imbalance,
     percent_imbalance,
     time_profile,
@@ -43,6 +50,8 @@ __all__ = [
     "per_pe_utilization",
     "per_interval_utilization",
     "load_imbalance_score",
+    "noise_miner",
+    "noise_occurrences",
     # Plots
     "time_profile",
     "usage_profile",
@@ -51,6 +60,7 @@ __all__ = [
     "message_size_histogram",
     "comm_per_pe",
     "extrema_analysis",
+    "noise_timeline",
     "chare_duration_comparison",
     "chare_frequency_comparison",
     "chare_activity_heatmap",

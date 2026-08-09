@@ -4,6 +4,7 @@ from .comm_per_pe import comm_per_pe
 from .ep_profile import ep_profile
 from .extrema import extrema_analysis
 from .histograms import execution_time_histogram, message_size_histogram
+from .noise import noise_timeline
 from .paper import (
     chare_activity_heatmap,
     chare_duration_comparison,
@@ -25,6 +26,7 @@ __all__ = [
     "message_size_histogram",
     "comm_per_pe",
     "extrema_analysis",
+    "noise_timeline",
     "chare_duration_comparison",
     "chare_frequency_comparison",
     "chare_activity_heatmap",

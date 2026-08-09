@@ -60,6 +60,7 @@ Visualization and analysis library for [[https://github.com/caschb/charmvz-cpp][
 | ~message_size_histogram()~   | Histogram of message sizes                  |
 | ~comm_per_pe()~              | Bar chart of communication metrics per PE   |
 | ~extrema_analysis()~         | Outlier identification and ranking          |
+| ~noise_timeline()~           | Stacked bar chart of detected noise over time |
 
 
 ** Analysis Utilities
@@ -70,7 +71,17 @@ Visualization and analysis library for [[https://github.com/caschb/charmvz-cpp][
 
   # Load imbalance score (coefficient of variation)
   score = cv.load_imbalance_score(ds)
+
+  # Noise Miner: clusters of recurring interruptions to execution
+  clusters = cv.noise_miner(ds, quantum_us=4000)
 #+END_SRC
+
+The Noise Miner reports one row per cluster of recurring noise, with its median
+duration, the PEs affected, the occurrence count, the median interval between
+occurrences on one PE, and a heuristic label for the likely source. Two signals
+feed it: executions running longer than the median for their own entry method,
+and wall-clock time covered by neither an execution nor an idle interval.
+~noise_occurrences()~ returns the individual events behind a cluster.
 
 ** Running Tests
 
