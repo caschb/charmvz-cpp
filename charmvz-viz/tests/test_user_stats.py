@@ -98,6 +98,33 @@ class TestUserStatsOverTime:
         plt.close(lo)
         plt.close(hi)
 
+    def test_secondary_axis_creates_a_second_scale(
+        self, instrumented_ds: TraceDataset
+    ) -> None:
+        # residual is ~10 and particle count ~100; on one axis the smaller
+        # series is flat. A right-hand axis gives it its own scale.
+        fig = user_stats_over_time(instrumented_ds, secondary_stats=[1])
+        assert len(fig.axes) == 2
+        left, right = fig.axes
+        assert left.get_ylim() != right.get_ylim()
+        # Both series are still drawn, one on each axis.
+        assert len(left.get_lines()) == 1
+        assert len(right.get_lines()) == 1
+        plt.close(fig)
+
+    def test_secondary_axis_absent_by_default(
+        self, instrumented_ds: TraceDataset
+    ) -> None:
+        fig = user_stats_over_time(instrumented_ds)
+        assert len(fig.axes) == 1
+        plt.close(fig)
+
+    def test_secondary_must_be_a_subset_of_stats(
+        self, instrumented_ds: TraceDataset
+    ) -> None:
+        with pytest.raises(ValueError, match="subset"):
+            user_stats_over_time(instrumented_ds, stats=[0], secondary_stats=[1])
+
     def test_user_time_axis(self, instrumented_ds: TraceDataset) -> None:
         # Stat 0 carries a user time; the x values must come from that column
         # (0.5, 1.0, 1.5) and not from the trace clock in seconds (1, 2, 3).

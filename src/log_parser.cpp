@@ -112,6 +112,14 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
     int32_t current_pe_id = -1;
     if (std::regex_match(filename, match, log_regex)) {
       current_pe_id = std::stoi(match[1]);
+    } else {
+      // Every row this pipeline writes is keyed on the PE that owns the log
+      // file, so a file whose name yields no PE cannot be attributed at all.
+      // Parsing it anyway would write rows on a PE that does not exist, which
+      // no downstream join rejects.
+      spdlog::error("Skipping {}: cannot determine the PE from its name",
+                    filename);
+      continue;
     }
 
     zstr::ifstream log_stream(log_path);

@@ -56,6 +56,15 @@ public:
     log_paths_.push_back(path.string());
   }
 
+  // Writes a file into the log set whose name carries no PE number, so a test
+  // can drive the path where attribution is impossible.
+  void add_unnamed_log(const std::string &name, const std::string &records) {
+    auto path = root_ / "logs" / name;
+    std::ofstream out(path);
+    out << "PROJECTIONS-RECORD 0\n" << records;
+    log_paths_.push_back(path.string());
+  }
+
   [[nodiscard]] auto sts_path() const -> std::string {
     return (root_ / "logs" / "test.sts").string();
   }

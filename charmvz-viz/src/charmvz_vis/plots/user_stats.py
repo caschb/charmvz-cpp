@@ -93,6 +93,7 @@ def user_stats_over_time(
     time_range: tuple[int, int] | None = None,
     *,
     stats: Sequence[int] | None = None,
+    secondary_stats: Sequence[int] | None = None,
     aggregation: Aggregation = "mean",
     use_user_time: bool = False,
     figsize: tuple[float, float] = (12, 5),
@@ -105,6 +106,9 @@ def user_stats_over_time(
     pes : PE filter
     time_range : filter on ``time_us``
     stats : stat ids to plot; all of them by default
+    secondary_stats : stat ids to put on a right-hand axis. Statistics
+        registered by one application routinely differ by orders of magnitude,
+        and a series plotted against another's scale is a flat line at zero
     aggregation : how to combine PEs reporting at the same instant
     use_user_time : plot against the application's own ``user_time_s`` instead
         of the trace clock. That column is in the application's units, so the
@@ -117,6 +121,10 @@ def user_stats_over_time(
     """
     if aggregation not in _AGGREGATIONS:
         raise ValueError(f"aggregation must be one of {sorted(_AGGREGATIONS)}")
+
+    secondary = set(secondary_stats or ())
+    if stats is not None and not secondary <= set(stats):
+        raise ValueError("secondary_stats must be a subset of stats")
 
     df = _filtered(ds, pes, time_range, stats)
     title = "User Stats Over Time"
@@ -140,24 +148,34 @@ def user_stats_over_time(
     )
 
     fig, ax = plt.subplots(figsize=figsize)
+    ax_right = ax.twinx() if secondary else None
+    handles = []
+
     for i, ((stat_id, name), series) in enumerate(
         sorted(grouped.group_by("stat_id", "name"), key=lambda item: item[0][0])
     ):
         x = series[x_col].to_numpy()
         if not use_user_time:
             x = x / 1e6
-        ax.plot(
+        on_right = stat_id in secondary
+        target = ax_right if on_right else ax
+        label = _stat_label(stat_id, name) + (" (right)" if on_right else "")
+        (line,) = target.plot(
             x,
             series["value"].to_numpy(),
-            label=_stat_label(stat_id, name),
+            label=label,
             color=_BASE_PALETTE[i % len(_BASE_PALETTE)],
             linewidth=1.4,
+            linestyle="--" if on_right else "-",
         )
+        handles.append(line)
 
     ax.set_xlabel("Application time" if use_user_time else "Time (s)")
     ax.set_ylabel(f"Value ({aggregation} across PEs)")
+    if ax_right is not None:
+        ax_right.set_ylabel(f"Value, right axis ({aggregation} across PEs)")
     ax.set_title(title)
-    ax.legend(fontsize=8, framealpha=0.9)
+    ax.legend(handles=handles, fontsize=8, framealpha=0.9)
     fig.tight_layout()
     return fig
 

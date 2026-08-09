@@ -257,6 +257,32 @@ TEST_CASE("A byte count above 2^31 survives the round trip",
   CHECK(*bytes[0] == 5368709120LL);
 }
 
+TEST_CASE("A log whose name yields no PE is skipped, not attributed to -1",
+          "[user_stat][memory_sample]") {
+  // Found on a real trace: the run's own trace_<job>.tar.gz sat in the trace
+  // directory, main.cpp accepted it for its .gz extension, zstr decompressed
+  // it, and four stretches of tar header parsed as code-27 and code-32
+  // records. They reached the output on pe_id -1, a PE that does not exist,
+  // and no downstream join rejects such a row.
+  TempTrace trace(kStsWithStats);
+  trace.add_log(0, "32 1000 -1 2.5 0 0\n"
+                   "27 4096 1500\n");
+  trace.add_unnamed_log("archive.tar", "32 2000 -1 9.9 0 0\n"
+                                       "27 8192 2500\n");
+  run(trace);
+
+  ParquetTable stats(trace.out_dir() + "/user_stat.parquet");
+  ParquetTable memory(trace.out_dir() + "/memory_sample.parquet");
+  REQUIRE(stats.rows() == 1);
+  REQUIRE(memory.rows() == 1);
+  for (const auto &pe : stats.ints("pe_id")) {
+    CHECK(*pe >= 0);
+  }
+  for (const auto &pe : memory.ints("pe_id")) {
+    CHECK(*pe >= 0);
+  }
+}
+
 TEST_CASE("The two record types do not consume each other's records",
           "[user_stat][memory_sample]") {
   // Both were previously dropped by the same `default:` arm, so a dispatch

@@ -10,6 +10,7 @@
 #include <arrow/builder.h>
 #include <exception>
 #include <filesystem>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -54,7 +55,19 @@ auto main(int argc, char **argv) -> int {
     } else if (extension == ".projrc") {
       rc_file_path.assign(entry.path());
     } else if (extension == ".gz" || extension == ".log") {
-      traces_paths.emplace_back(entry.path().c_str());
+      // Match the per-PE log naming, not merely the extension. A trace
+      // directory can legitimately hold other gzipped files -- an archive of
+      // the trace itself is the common one -- and zstr will decompress any of
+      // them happily. The parser then reads whatever bytes come out as
+      // records, and the few that resemble one land in the output attributed
+      // to no PE at all.
+      static const std::regex log_name{R"(.*\.\d+\.log(\.gz)?$)"};
+      const std::string filename{entry.path().filename()};
+      if (std::regex_match(filename, log_name)) {
+        traces_paths.emplace_back(entry.path().c_str());
+      } else {
+        spdlog::warn("Ignoring {}: not a per-PE log file name", filename);
+      }
     }
   }
 
