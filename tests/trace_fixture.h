@@ -108,6 +108,24 @@ public:
     return values;
   }
 
+  [[nodiscard]] auto doubles(const std::string &column) const
+      -> std::vector<std::optional<double>> {
+    auto chunked = table_->GetColumnByName(column);
+    REQUIRE(chunked != nullptr);
+    std::vector<std::optional<double>> values;
+    for (const auto &chunk : chunked->chunks()) {
+      auto array = std::static_pointer_cast<arrow::DoubleArray>(chunk);
+      for (int64_t i = 0; i < array->length(); ++i) {
+        if (array->IsNull(i)) {
+          values.emplace_back(std::nullopt);
+        } else {
+          values.emplace_back(array->Value(i));
+        }
+      }
+    }
+    return values;
+  }
+
   [[nodiscard]] auto strings(const std::string &column) const
       -> std::vector<std::optional<std::string>> {
     auto chunked = table_->GetColumnByName(column);

@@ -133,4 +133,45 @@ private:
   arrow::StringBuilder note;
 };
 
+class UserStatBuilder {
+public:
+  UserStatBuilder(ParquetWriter &writer);
+  void Append(const UserStatSample &sample);
+  void Flush();
+  void TryFlush() {
+    if (pe_id.length() >= ROW_GROUP_SIZE)
+      Flush();
+  }
+
+private:
+  ParquetWriter &writer_;
+  std::shared_ptr<arrow::Schema> schema_;
+
+  arrow::Int32Builder pe_id;
+  arrow::Int32Builder stat_id;
+  arrow::StringBuilder name;
+  arrow::Int64Builder time_us;
+  arrow::DoubleBuilder stat_value;
+  arrow::DoubleBuilder user_time_s;
+};
+
+class MemorySampleBuilder {
+public:
+  MemorySampleBuilder(ParquetWriter &writer);
+  void Append(const MemorySample &sample);
+  void Flush();
+  void TryFlush() {
+    if (pe_id.length() >= ROW_GROUP_SIZE)
+      Flush();
+  }
+
+private:
+  ParquetWriter &writer_;
+  std::shared_ptr<arrow::Schema> schema_;
+
+  arrow::Int32Builder pe_id;
+  arrow::Int64Builder time_us;
+  arrow::Int64Builder bytes;
+};
+
 } // namespace charmvz::builders

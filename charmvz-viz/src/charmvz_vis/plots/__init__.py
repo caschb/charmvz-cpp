@@ -4,6 +4,7 @@ from .comm_per_pe import comm_per_pe
 from .ep_profile import ep_profile
 from .extrema import extrema_analysis
 from .histograms import execution_time_histogram, message_size_histogram
+from .memory import memory_usage
 from .noise import noise_timeline
 from .paper import (
     chare_activity_heatmap,
@@ -17,6 +18,7 @@ from .paper import (
 )
 from .time_profile import time_profile
 from .usage_profile import usage_profile
+from .user_stats import user_stats_over_time, user_stats_per_pe
 
 __all__ = [
     "time_profile",
@@ -27,6 +29,9 @@ __all__ = [
     "comm_per_pe",
     "extrema_analysis",
     "noise_timeline",
+    "memory_usage",
+    "user_stats_over_time",
+    "user_stats_per_pe",
     "chare_duration_comparison",
     "chare_frequency_comparison",
     "chare_activity_heatmap",

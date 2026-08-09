@@ -618,3 +618,97 @@ def idle_covered_ds(idle_covered_trace: Path):
     from charmvz_vis import TraceDataset
 
     return TraceDataset(idle_covered_trace)
+
+
+# ── Application-instrumented tables ──────────────────────────────────────────
+#
+# user_stat and memory_sample only exist when the traced application calls
+# updateStat() and traceMemoryUsage() itself. No reference trace does, so these
+# fixtures are the only data the views can be tested against.
+
+STAT_TIMES_US = [1_000_000, 2_000_000, 3_000_000]
+STAT_PES = [0, 1]
+
+
+@pytest.fixture
+def instrumented_trace(tiny_trace: Path) -> Path:
+    """The tiny trace plus user_stat and memory_sample tables.
+
+    Two stats over three instants on two PEs. Stat 0 ("residual") carries an
+    application-supplied time; stat 1 ("particle count") does not, so its
+    ``user_time_s`` is null throughout, which is what updateStat() produces.
+    """
+    pe_ids: list[int] = []
+    stat_ids: list[int] = []
+    names: list[str] = []
+    times: list[int] = []
+    values: list[float] = []
+    user_times: list[float | None] = []
+
+    for pe in STAT_PES:
+        for i, t in enumerate(STAT_TIMES_US):
+            # residual: falls with iteration, and differs between PEs so a
+            # per-PE comparison has something to show.
+            pe_ids.append(pe)
+            stat_ids.append(0)
+            names.append("residual")
+            times.append(t)
+            values.append(10.0 / (i + 1) + pe)
+            user_times.append(0.5 * (i + 1))
+
+            pe_ids.append(pe)
+            stat_ids.append(1)
+            names.append("particle count")
+            times.append(t)
+            values.append(100.0 + 10 * i + pe)
+            user_times.append(None)
+
+    _write_pq(
+        tiny_trace / "user_stat.parquet",
+        pa.schema([
+            ("pe_id", pa.int32()),
+            ("stat_id", pa.int32()),
+            ("name", pa.utf8()),
+            ("time_us", pa.int64()),
+            ("stat_value", pa.float64()),
+            ("user_time_s", pa.float64()),
+        ]),
+        {
+            "pe_id": pe_ids,
+            "stat_id": stat_ids,
+            "name": names,
+            "time_us": times,
+            "stat_value": values,
+            "user_time_s": user_times,
+        },
+    )
+
+    mem_pes: list[int] = []
+    mem_times: list[int] = []
+    mem_bytes: list[int] = []
+    for pe in STAT_PES:
+        for i, t in enumerate(STAT_TIMES_US):
+            mem_pes.append(pe)
+            mem_times.append(t)
+            # Grows over the run, and PE 1 holds more than PE 0.
+            mem_bytes.append((64 + 16 * i + 32 * pe) * 1024 * 1024)
+
+    _write_pq(
+        tiny_trace / "memory_sample.parquet",
+        pa.schema([
+            ("pe_id", pa.int32()),
+            ("time_us", pa.int64()),
+            ("bytes", pa.int64()),
+        ]),
+        {"pe_id": mem_pes, "time_us": mem_times, "bytes": mem_bytes},
+    )
+
+    return tiny_trace
+
+
+@pytest.fixture
+def instrumented_ds(instrumented_trace: Path):
+    """A TraceDataset carrying user stats and memory samples."""
+    from charmvz_vis import TraceDataset
+
+    return TraceDataset(instrumented_trace)

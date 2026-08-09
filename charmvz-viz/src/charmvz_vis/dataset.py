@@ -51,10 +51,15 @@ class TraceDataset:
     # deliberately: `user_event` and `simulation_step` are empty or absent
     # unless the traced application instruments itself, and refusing to open an
     # uninstrumented trace would be wrong.
+    # `user_stat` and `memory_sample` join them for the same reason: both come
+    # from calls the application has to make itself (updateStat() and
+    # traceMemoryUsage()), and neither is emitted by the runtime on its own.
     _OPTIONAL_FILES = {
         "user_event": "user_event.parquet",
         "simulation_step": "simulation_step.parquet",
         "message_type": "message_type.parquet",
+        "user_stat": "user_stat.parquet",
+        "memory_sample": "memory_sample.parquet",
     }
 
     def __init__(self, trace_dir: str | Path) -> None:
@@ -176,6 +181,33 @@ class TraceDataset:
         for most types in the ChaNGa reference trace.
         """
         return self._scan_optional("message_type")
+
+    @property
+    def user_stat(self) -> pl.LazyFrame | None:
+        """UserStat table, or None when the pipeline did not write one.
+
+        One row per ``updateStat()`` / ``updateStatPair()`` call: the statistic
+        value, the registered name, and the PE and time it was recorded at.
+
+        ``user_time_s`` is the application's own time value and is **not** in
+        the aligned microseconds every other time column uses. The runtime
+        writes it raw, so it carries whatever unit the caller passed, and it is
+        null when the application used ``updateStat()`` and supplied none.
+
+        Empty for a trace whose application registers no statistics, which is
+        the case for all three current reference traces.
+        """
+        return self._scan_optional("user_stat")
+
+    @property
+    def memory_sample(self) -> pl.LazyFrame | None:
+        """MemorySample table, or None when the pipeline did not write one.
+
+        One row per ``traceMemoryUsage()`` call, giving heap bytes on one PE at
+        one instant. The runtime never calls it on the application's behalf, so
+        this is empty unless the application samples memory itself.
+        """
+        return self._scan_optional("memory_sample")
 
     # ── Convenience metadata ─────────────────────────────────────────────
 

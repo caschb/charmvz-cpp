@@ -63,4 +63,14 @@ auto simulation_step() -> std::shared_ptr<arrow::Schema>;
  */
 auto message_type() -> std::shared_ptr<arrow::Schema>;
 
+/**
+ * Returns the formal Arrow schema for the UserStat entity.
+ */
+auto user_stat() -> std::shared_ptr<arrow::Schema>;
+
+/**
+ * Returns the formal Arrow schema for the MemorySample entity.
+ */
+auto memory_sample() -> std::shared_ptr<arrow::Schema>;
+
 } // namespace charmvz::schema

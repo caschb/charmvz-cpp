@@ -30,6 +30,7 @@ from .plots import (
     ep_profile,
     execution_time_histogram,
     extrema_analysis,
+    memory_usage,
     message_size_histogram,
     noise_timeline,
     paper_percent_imbalance,
@@ -39,6 +40,8 @@ from .plots import (
     timeline_with_imbalance,
     timeline_with_paper_imbalance,
     usage_profile,
+    user_stats_over_time,
+    user_stats_per_pe,
 )
 
 __version__ = "0.1.0"
@@ -61,6 +64,9 @@ __all__ = [
     "comm_per_pe",
     "extrema_analysis",
     "noise_timeline",
+    "memory_usage",
+    "user_stats_over_time",
+    "user_stats_per_pe",
     "chare_duration_comparison",
     "chare_frequency_comparison",
     "chare_activity_heatmap",

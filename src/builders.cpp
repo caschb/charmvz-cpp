@@ -280,4 +280,62 @@ void UserEventBuilder::Flush() {
   writer_.WriteBatch(batch);
 }
 
+UserStatBuilder::UserStatBuilder(ParquetWriter &writer)
+    : writer_(writer), schema_(charmvz::schema::user_stat()) {}
+
+void UserStatBuilder::Append(const UserStatSample &sample) {
+  PARQUET_THROW_NOT_OK(pe_id.Append(sample.pe_id));
+  PARQUET_THROW_NOT_OK(stat_id.Append(sample.stat_id));
+  if (sample.has_name) {
+    PARQUET_THROW_NOT_OK(name.Append(sample.name));
+  } else {
+    PARQUET_THROW_NOT_OK(name.AppendNull());
+  }
+  PARQUET_THROW_NOT_OK(time_us.Append(sample.time_us));
+  PARQUET_THROW_NOT_OK(stat_value.Append(sample.stat_value));
+  if (sample.has_user_time) {
+    PARQUET_THROW_NOT_OK(user_time_s.Append(sample.user_time_s));
+  } else {
+    PARQUET_THROW_NOT_OK(user_time_s.AppendNull());
+  }
+  TryFlush();
+}
+
+void UserStatBuilder::Flush() {
+  if (pe_id.length() == 0)
+    return;
+  std::vector<std::shared_ptr<arrow::Array>> arrays(6);
+  PARQUET_THROW_NOT_OK(pe_id.Finish(&arrays[0]));
+  PARQUET_THROW_NOT_OK(stat_id.Finish(&arrays[1]));
+  PARQUET_THROW_NOT_OK(name.Finish(&arrays[2]));
+  PARQUET_THROW_NOT_OK(time_us.Finish(&arrays[3]));
+  PARQUET_THROW_NOT_OK(stat_value.Finish(&arrays[4]));
+  PARQUET_THROW_NOT_OK(user_time_s.Finish(&arrays[5]));
+
+  auto batch = arrow::RecordBatch::Make(schema_, arrays[0]->length(), arrays);
+  writer_.WriteBatch(batch);
+}
+
+MemorySampleBuilder::MemorySampleBuilder(ParquetWriter &writer)
+    : writer_(writer), schema_(charmvz::schema::memory_sample()) {}
+
+void MemorySampleBuilder::Append(const MemorySample &sample) {
+  PARQUET_THROW_NOT_OK(pe_id.Append(sample.pe_id));
+  PARQUET_THROW_NOT_OK(time_us.Append(sample.time_us));
+  PARQUET_THROW_NOT_OK(bytes.Append(sample.bytes));
+  TryFlush();
+}
+
+void MemorySampleBuilder::Flush() {
+  if (pe_id.length() == 0)
+    return;
+  std::vector<std::shared_ptr<arrow::Array>> arrays(3);
+  PARQUET_THROW_NOT_OK(pe_id.Finish(&arrays[0]));
+  PARQUET_THROW_NOT_OK(time_us.Finish(&arrays[1]));
+  PARQUET_THROW_NOT_OK(bytes.Finish(&arrays[2]));
+
+  auto batch = arrow::RecordBatch::Make(schema_, arrays[0]->length(), arrays);
+  writer_.WriteBatch(batch);
+}
+
 } // namespace charmvz::builders

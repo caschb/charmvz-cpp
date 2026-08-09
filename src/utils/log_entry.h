@@ -79,6 +79,14 @@ struct LogEntry {
   int32_t userSuppliedData;
   // The text of a USER_SUPPLIED_NOTE / USER_SUPPLIED_BRACKETED_NOTE record.
   std::string userSuppliedNote;
+  // The statistic value of a USER_STAT record.
+  double stat;
+  // The application-supplied time of a USER_STAT record, written raw rather
+  // than as integer microseconds (trace-projections.C:776). -1 means the
+  // application called updateStat() and supplied none.
+  double statTime;
+  // The byte count of a MEMORY_USAGE_CURRENT record.
+  uint64_t memUsage;
 };
 
 auto to_string(const LogType &type) -> const char *;

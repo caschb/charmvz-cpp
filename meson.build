@@ -65,7 +65,7 @@ executable(
 # Tests are skipped when Catch2 is not installed, so a plain build never
 # requires it.
 if catch2_dep.found()
-    foreach unit : ['sts_parser', 'parquet_writer', 'log_parser', 'chare_index', 'migration']
+    foreach unit : ['sts_parser', 'parquet_writer', 'log_parser', 'chare_index', 'migration', 'user_stat']
         test(
             unit,
             executable(

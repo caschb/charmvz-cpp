@@ -104,6 +104,28 @@ struct UserEventOccurrence {
   bool has_note;
 };
 
+// One USER_STAT sample before writing. `user_time_s` is absent when the
+// application called updateStat() rather than updateStatPair(), which the
+// runtime records as -1; the flag keeps that apart from a genuine -1 the
+// application chose to pass.
+struct UserStatSample {
+  int32_t pe_id;
+  int32_t stat_id;
+  std::string name;
+  bool has_name;
+  int64_t time_us;
+  double stat_value;
+  double user_time_s;
+  bool has_user_time;
+};
+
+// One MEMORY_USAGE_CURRENT sample before writing.
+struct MemorySample {
+  int32_t pe_id;
+  int64_t time_us;
+  int64_t bytes;
+};
+
 // One PE's occupancy of one timestep, derived from a matched pair of
 // step-boundary user events. `end_time_us` is absent when the log ends inside
 // the step, which happens if tracing stops mid-run.

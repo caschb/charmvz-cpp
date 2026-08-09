@@ -203,4 +203,51 @@ auto message_type() -> std::shared_ptr<arrow::Schema> {
                         arrow::field("size_bytes", arrow::int64(), false)});
 }
 
+// One application-declared statistic sample, from a USER_STAT record (code 32)
+// emitted by updateStat() / updateStatPair().
+//
+// `stat_id` indexes the STS `STAT` registry populated by
+// traceRegisterUserStat(); the registered name is denormalized into every row,
+// as UserEvent does, because a stat has no attribute beyond its name and
+// Parquet dictionary-encodes the repetition away.
+//
+// `user_time_s` is the one time field in this schema that is *not* aligned
+// microseconds. USER_STAT writes the `cputime` member raw
+// (trace-projections.C:775-776), with no `1.0e6*` conversion of the kind every
+// other record applies, so the value is a float in whatever unit the
+// application passed to updateStatPair(). updateStat() supplies -1, which is
+// stored as NULL rather than as a negative time.
+//
+// Unlike the bracketed user-event forms, the record's own `pe` field is
+// genuine: it is CkMyPe() at emission (trace-projections.C:1141). `pe_id` still
+// comes from the log file name, so that every table in this schema keys on PE
+// the same way.
+auto user_stat() -> std::shared_ptr<arrow::Schema> {
+  return arrow::schema({arrow::field("pe_id", arrow::int32(), false),
+                        arrow::field("stat_id", arrow::int32(), false),
+                        arrow::field("name", arrow::utf8(), true),
+                        arrow::field("time_us", arrow::int64(), false),
+                        arrow::field("stat_value", arrow::float64(), false),
+                        arrow::field("user_time_s", arrow::float64(), true)});
+}
+
+// One heap-usage sample, from a MEMORY_USAGE_CURRENT record (code 27) emitted
+// by traceMemoryUsage().
+//
+// The record carries no PE field at all, so `pe_id` can only come from the log
+// file name. It also writes `memUsage` *before* `itime`
+// (trace-projections.C:770-772), reversing the field order every other record
+// uses; reading the two in the usual order yields a byte count parsed as a
+// timestamp, which produces a well-typed table of nonsense.
+//
+// `bytes` is int64 rather than uint64: the runtime writes an `unsigned long`,
+// but Parquet has no unsigned 64-bit type that round-trips through Arrow
+// without surprising consumers, and a heap measured in exabytes is not a case
+// worth carrying.
+auto memory_sample() -> std::shared_ptr<arrow::Schema> {
+  return arrow::schema({arrow::field("pe_id", arrow::int32(), false),
+                        arrow::field("time_us", arrow::int64(), false),
+                        arrow::field("bytes", arrow::int64(), false)});
+}
+
 } // namespace charmvz::schema

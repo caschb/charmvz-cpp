@@ -88,12 +88,18 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                                       output_dir + "/chare_instance.parquet");
   charmvz::ParquetWriter user_event_writer(charmvz::schema::user_event(),
                                            output_dir + "/user_event.parquet");
+  charmvz::ParquetWriter user_stat_writer(charmvz::schema::user_stat(),
+                                          output_dir + "/user_stat.parquet");
+  charmvz::ParquetWriter memory_sample_writer(
+      charmvz::schema::memory_sample(), output_dir + "/memory_sample.parquet");
 
   builders::ExecutionBuilder exec_builder(exec_writer, exec_schema,
                                           sts_data.total_papi_events);
   builders::IdleIntervalBuilder idle_builder(idle_writer);
   builders::ChareInstanceBuilder chare_builder(chare_writer);
   builders::UserEventBuilder user_event_builder(user_event_writer);
+  builders::UserStatBuilder user_stat_builder(user_stat_writer);
+  builders::MemorySampleBuilder memory_sample_builder(memory_sample_writer);
 
   const int64_t global_start_us = rc_data.global_start_time_us;
 
@@ -440,6 +446,42 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                      static_cast<int64_t>(e.itime) - global_start_us, true);
         break;
       }
+      case LogType::USER_STAT: {
+        // `cputime` here is the application's own time value, written raw
+        // rather than as integer microseconds like every other time field
+        // (trace-projections.C:775-776), so it is read as a double. The
+        // record's `pe` is genuine (CkMyPe()) but is read and discarded, since
+        // every table in this schema keys on the log file's PE.
+        iss >> e.itime >> e.statTime >> e.stat >> e.pe >> e.mIdx;
+        UserStatSample sample{};
+        sample.pe_id = current_pe_id;
+        sample.stat_id = e.mIdx;
+        sample.time_us = static_cast<int64_t>(e.itime) - global_start_us;
+        sample.stat_value = e.stat;
+        // updateStat() records -1 for "the application supplied no time"
+        // (trace-projections.C:1144-1148).
+        sample.has_user_time = e.statTime != -1.0;
+        sample.user_time_s = e.statTime;
+        auto stat_it = sts_data.user_stat_map.find(sample.stat_id);
+        if (stat_it != sts_data.user_stat_map.end()) {
+          sample.name = stat_it->second.name;
+          sample.has_name = true;
+        }
+        user_stat_builder.Append(sample);
+        break;
+      }
+      case LogType::MEMORY_USAGE_CURRENT: {
+        // The byte count comes *before* the timestamp, reversing the order
+        // every other record uses (trace-projections.C:770-772), and the
+        // record carries no PE field at all.
+        iss >> e.memUsage >> e.itime;
+        MemorySample sample{};
+        sample.pe_id = current_pe_id;
+        sample.time_us = static_cast<int64_t>(e.itime) - global_start_us;
+        sample.bytes = static_cast<int64_t>(e.memUsage);
+        memory_sample_builder.Append(sample);
+        break;
+      }
       default:
         break;
       }
@@ -474,6 +516,8 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
   idle_builder.Flush();
   chare_builder.Flush();
   user_event_builder.Flush();
+  user_stat_builder.Flush();
+  memory_sample_builder.Flush();
 
   return result;
 }
