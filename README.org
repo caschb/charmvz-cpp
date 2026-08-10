@@ -80,6 +80,58 @@ Log verbosity is set through the ~SPDLOG_LEVEL~ environment variable, not a flag
 SPDLOG_LEVEL=debug ./builddir-rel/charmvz -l traces/ -o out/
 #+end_src
 
+*** Building on the Kabré cluster
+
+Worth its own section because the login node misrepresents the machine you
+have to run on, in three separate ways.
+
+| | Login (~login-*.cnca~) | Compute (~kura-*.cnca~) |
+|---------+------------------------+-------------------------|
+| OS | AlmaLinux 9.7 | AlmaLinux 8.10 |
+| glibc | 2.34 | 2.28 |
+| System ~g++~ | 11.5 | 8.5 |
+| ~gcc/13.4.0~ module | works | will not start |
+| GNU ~time~ | present | absent |
+
+Binaries have to run on the compute nodes, so glibc 2.28 is the target. The
+~gcc~ modules are built for the login image and abort with missing
+~GLIBC_2.32~ symbols on a compute node, and the compute nodes' own ~g++~ 8.5
+predates the C++20 this project needs. Neither system compiler is usable.
+
+Nor is Arrow available anywhere on the cluster, in any form. The route that
+works is a user-space conda environment providing Arrow, Parquet, spdlog,
+CLI11, meson and ninja. Its libraries need at most ~GLIBC_2.17~, so they load
+on the compute nodes without complaint.
+
+One gap remains. The conda toolchain is ~gcc~ 16, whose ~libstdc++~ inlines a
+read of ~__libc_single_threaded~ into anything using ~shared_ptr~. That object
+arrived in glibc 2.32 and does not exist in 2.28, so every such translation
+unit fails to link. Note that conda's own ~sysroot_linux-64~ does not save you
+here: the package is labelled 2.34 but ships a glibc 2.28 ~libc.so.6~.
+
+Supplying the symbol resolves it, and costs nothing the platform would not
+already pay, since a ~libstdc++~ built against 2.28 uses the atomic refcount
+path regardless:
+
+#+begin_src cpp
+// glibc228_compat.cpp
+extern "C" char __libc_single_threaded = 0;
+#+end_src
+
+#+begin_src bash
+ENV=/path/to/conda/env
+export PATH="$ENV/bin:$PATH" PKG_CONFIG_PATH="$ENV/lib/pkgconfig"
+export LD_LIBRARY_PATH="$ENV/lib:$LD_LIBRARY_PATH"
+export CC="$ENV/bin/x86_64-conda-linux-gnu-cc" CXX="$ENV/bin/x86_64-conda-linux-gnu-c++"
+$CXX -O2 -fPIC -c glibc228_compat.cpp -o glibc228_compat.o
+export LDFLAGS="$PWD/glibc228_compat.o"
+meson setup builddir-kabre --buildtype=release && meson compile -C builddir-kabre
+#+end_src
+
+Build and test on a compute node, never the login node: the login nodes are
+limited, and a build that succeeds there may not even start where it has to
+run. The test suite passes under this configuration against Arrow 25.0.0.
+
 ** Usage
 
 *** Command line
