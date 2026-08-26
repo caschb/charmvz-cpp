@@ -1,4 +1,4 @@
-"""Plots subpackage — Phase 1 visualization functions."""
+"""Plotting functions for CharmVZ trace data."""
 
 from .comm_per_pe import comm_per_pe
 from .ep_profile import ep_profile

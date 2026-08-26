@@ -21,7 +21,7 @@ from .analysis import (
 )
 from .dataset import TraceDataset
 
-# Plot functions — Phase 1
+# Plot functions
 from .plots import (
     chare_activity_heatmap,
     chare_duration_comparison,

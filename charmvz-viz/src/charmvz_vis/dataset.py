@@ -47,10 +47,8 @@ class TraceDataset:
         "migration_episode": "migration_episode.parquet",
     }
 
-    # Added by Phase 1.1 of the CCGrid 2027 work. Kept out of the required set
-    # deliberately: `user_event` and `simulation_step` are empty or absent
-    # unless the traced application instruments itself, and refusing to open an
-    # uninstrumented trace would be wrong.
+    # These tables are optional because `user_event` and `simulation_step` are
+    # empty or absent unless the traced application instruments itself.
     # `user_stat` and `memory_sample` join them for the same reason: both come
     # from calls the application has to make itself (updateStat() and
     # traceMemoryUsage()), and neither is emitted by the runtime on its own.

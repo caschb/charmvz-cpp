@@ -285,8 +285,7 @@ TEST_CASE("A log whose name yields no PE is skipped, not attributed to -1",
 
 TEST_CASE("The two record types do not consume each other's records",
           "[user_stat][memory_sample]") {
-  // Both were previously dropped by the same `default:` arm, so a dispatch
-  // mistake that routed one into the other would have gone unnoticed.
+  // A dispatch error must not route one record type into the other's table.
   TempTrace trace(kStsWithStats);
   trace.add_log(0, "32 1000 -1 2.5 0 0\n"
                    "27 4096 1500\n"
