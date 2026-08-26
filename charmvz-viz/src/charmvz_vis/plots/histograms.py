@@ -9,14 +9,13 @@ Provides four histogram types matching the Projections spec:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-from ..colors import IDLE_COLOR
-from ..derived import compute_entry_spans, compute_idle_spans
+from ..derived import compute_entry_spans
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure

@@ -156,7 +156,7 @@ auto main(int argc, char **argv) -> int {
                                           out_path.string(), step_event_id);
 
   // Stage 3 & 4
-  charmvz::reconstruct_message_and_migration(log_result, sts_data, rc_data,
+  charmvz::reconstruct_message_and_migration(log_result, rc_data,
                                              out_path.string());
   charmvz::reconstruct_simulation_steps(log_result, out_path.string());
 

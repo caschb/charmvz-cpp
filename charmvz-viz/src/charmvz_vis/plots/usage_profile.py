@@ -48,7 +48,6 @@ def usage_profile(
     matplotlib Figure
     """
     tr = time_range or ds.time_range_us
-    window_us = tr[1] - tr[0]
 
     # ── Per-(PE, EP) total duration ──────────────────────────────────────
     spans = compute_entry_spans(ds, pes=pes, time_range=tr)

@@ -7,10 +7,8 @@ without needing real trace files.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
-import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest

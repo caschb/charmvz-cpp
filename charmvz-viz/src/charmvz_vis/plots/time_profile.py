@@ -70,7 +70,6 @@ def time_profile(
     )
 
     top_eps = ep_totals.head(top_n)
-    top_ep_ids = set(top_eps["ep_id"].to_list())
     ep_names = dict(zip(top_eps["ep_id"].to_list(), top_eps["ep_name"].to_list()))
 
     # ── Build bin × EP matrix ────────────────────────────────────────────

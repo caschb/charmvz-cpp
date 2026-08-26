@@ -48,7 +48,7 @@ void run(const TempTrace &trace) {
   rc.global_end_time_us = 0;
   const auto result =
       charmvz::process_logs(trace.log_paths(), sts, rc, trace.out_dir(), -1);
-  charmvz::reconstruct_message_and_migration(result, sts, rc, trace.out_dir());
+  charmvz::reconstruct_message_and_migration(result, rc, trace.out_dir());
 }
 
 // One execution of an array element: BEGIN_PROCESSING then END_PROCESSING on

@@ -220,7 +220,11 @@ class TraceDataset:
         begin_vals = pe_df["aligned_begin_us"].drop_nulls()
         end_vals = pe_df["end_time_us"].drop_nulls()
         t_start = int(begin_vals.min()) if len(begin_vals) > 0 else 0
-        t_end = int(end_vals.max() - global_start) if len(end_vals) > 0 and global_start is not None else 0
+        t_end = (
+            int(end_vals.max() - global_start)
+            if len(end_vals) > 0 and global_start is not None
+            else 0
+        )
         self._pe_info = {
             "num_pes": int(num_pes),
             "global_start_us": int(global_start) if global_start is not None else 0,
