@@ -89,7 +89,9 @@ public:
     auto infile = arrow::io::ReadableFile::Open(path).ValueOrDie();
     auto reader = parquet::arrow::OpenFile(infile, arrow::default_memory_pool())
                       .ValueOrDie();
-    REQUIRE(reader->ReadTable(&table_).ok());
+    auto table = reader->ReadTable();
+    REQUIRE(table.ok());
+    table_ = std::move(table).ValueOrDie();
   }
 
   [[nodiscard]] auto rows() const -> int64_t { return table_->num_rows(); }

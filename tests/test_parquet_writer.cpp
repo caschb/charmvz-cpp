@@ -42,11 +42,11 @@ auto read_schema(const std::string &path) -> std::shared_ptr<arrow::Schema> {
   auto infile = arrow::io::ReadableFile::Open(path).ValueOrDie();
   auto reader = parquet::arrow::OpenFile(infile, arrow::default_memory_pool())
                     .ValueOrDie();
-  std::shared_ptr<arrow::Table> table;
-  if (!reader->ReadTable(&table).ok()) {
+  auto table = reader->ReadTable();
+  if (!table.ok()) {
     return nullptr;
   }
-  return table->schema();
+  return table.ValueOrDie()->schema();
 }
 
 } // namespace
