@@ -19,7 +19,7 @@ dependencies = [
     "numpy>=1.24",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 interactive = ["plotly>=5.18", "ipywidgets>=8.0"]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 

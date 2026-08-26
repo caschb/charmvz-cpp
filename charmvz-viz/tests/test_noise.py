@@ -35,25 +35,33 @@ def _cluster(summary: pl.DataFrame, kind: str) -> dict:
     return rows.row(0, named=True)
 
 
+@pytest.fixture
+def default_noise_summary(noisy_ds: TraceDataset) -> pl.DataFrame:
+    """The unfiltered report used by the default-behaviour checks."""
+    return noise_miner(noisy_ds)
+
+
 class TestExecutionNoise:
     """Executions running long relative to their own entry method."""
 
-    def test_finds_one_cluster(self, noisy_ds: TraceDataset) -> None:
-        cluster = _cluster(noise_miner(noisy_ds), "execution")
+    def test_finds_one_cluster(self, default_noise_summary: pl.DataFrame) -> None:
+        cluster = _cluster(default_noise_summary, "execution")
         assert cluster["occurrences"] == STRETCH_PER_PE * STRETCH_PES
         assert cluster["pe_count"] == STRETCH_PES
 
-    def test_reports_the_excess_not_the_duration(self, noisy_ds: TraceDataset) -> None:
+    def test_reports_the_excess_not_the_duration(
+        self, default_noise_summary: pl.DataFrame
+    ) -> None:
         # The stretched executions run 6000 µs against a 1000 µs baseline. The
         # noise is the 5000 µs of excess; reporting 6000 would mean the miner is
         # measuring duration rather than anomaly.
-        cluster = _cluster(noise_miner(noisy_ds), "execution")
+        cluster = _cluster(default_noise_summary, "execution")
         assert cluster["noise_us_median"] == pytest.approx(STRETCH_EXCESS_US)
         assert cluster["noise_us_min"] == STRETCH_EXCESS_US
         assert cluster["noise_us_max"] == STRETCH_EXCESS_US
 
-    def test_total_and_fraction(self, noisy_ds: TraceDataset) -> None:
-        cluster = _cluster(noise_miner(noisy_ds), "execution")
+    def test_total_and_fraction(self, default_noise_summary: pl.DataFrame) -> None:
+        cluster = _cluster(default_noise_summary, "execution")
         expected_total = STRETCH_EXCESS_US * STRETCH_PER_PE * STRETCH_PES
         assert cluster["total_noise_us"] == expected_total
         # 4 PEs over a 260 ms window.
@@ -61,31 +69,33 @@ class TestExecutionNoise:
             expected_total / (260_000 * 4)
         )
 
-    def test_periodicity_is_recovered(self, noisy_ds: TraceDataset) -> None:
-        cluster = _cluster(noise_miner(noisy_ds), "execution")
+    def test_periodicity_is_recovered(self, default_noise_summary: pl.DataFrame) -> None:
+        cluster = _cluster(default_noise_summary, "execution")
         assert cluster["period_us"] == pytest.approx(STRETCH_PERIOD_US)
         assert cluster["period_cv"] == pytest.approx(0.0)
 
-    def test_regular_recurrence_is_labelled(self, noisy_ds: TraceDataset) -> None:
-        cluster = _cluster(noise_miner(noisy_ds), "execution")
+    def test_regular_recurrence_is_labelled(
+        self, default_noise_summary: pl.DataFrame
+    ) -> None:
+        cluster = _cluster(default_noise_summary, "execution")
         assert cluster["likely_source"] == "periodic daemon"
 
 
 class TestUnaccountedGaps:
     """Time covered by neither an execution nor an idle interval."""
 
-    def test_finds_the_planted_gap(self, noisy_ds: TraceDataset) -> None:
-        cluster = _cluster(noise_miner(noisy_ds), "idle_gap")
+    def test_finds_the_planted_gap(self, default_noise_summary: pl.DataFrame) -> None:
+        cluster = _cluster(default_noise_summary, "idle_gap")
         assert cluster["occurrences"] == GAP_PES
         assert cluster["pe_count"] == GAP_PES
         assert cluster["noise_us_median"] == pytest.approx(GAP_US)
 
     def test_single_occurrence_per_pe_has_no_period(
-        self, noisy_ds: TraceDataset
+        self, default_noise_summary: pl.DataFrame
     ) -> None:
         # One occurrence per PE means no interval to measure, which must read as
         # "unknown" rather than as a period of zero.
-        cluster = _cluster(noise_miner(noisy_ds), "idle_gap")
+        cluster = _cluster(default_noise_summary, "idle_gap")
         assert cluster["period_us"] is None
         assert cluster["period_cv"] is None
 
@@ -240,8 +250,10 @@ class TestLabelling:
 class TestOccurrences:
     """The per-event view backing the plot."""
 
-    def test_counts_agree_with_the_summary(self, noisy_ds: TraceDataset) -> None:
-        summary = noise_miner(noisy_ds)
+    def test_counts_agree_with_the_summary(
+        self, noisy_ds: TraceDataset, default_noise_summary: pl.DataFrame
+    ) -> None:
+        summary = default_noise_summary
         occ = noise_occurrences(noisy_ds)
         assert len(occ) == summary["occurrences"].sum()
 

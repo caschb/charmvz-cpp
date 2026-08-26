@@ -29,21 +29,19 @@ class TestTraceDataset:
         assert isinstance(ds.message, pl.LazyFrame)
         assert isinstance(ds.idle_interval, pl.LazyFrame)
 
-    def test_execution_row_count(self, ds: TraceDataset) -> None:
-        df = ds.execution.collect()
-        assert len(df) == 12
-
-    def test_message_row_count(self, ds: TraceDataset) -> None:
-        df = ds.message.collect()
-        assert len(df) == 6
-
-    def test_idle_interval_row_count(self, ds: TraceDataset) -> None:
-        df = ds.idle_interval.collect()
-        assert len(df) == 8
-
-    def test_entry_method_row_count(self, ds: TraceDataset) -> None:
-        df = ds.entry_method.collect()
-        assert len(df) == 3
+    @pytest.mark.parametrize(
+        ("table", "expected_rows"),
+        [
+            ("execution", 12),
+            ("message", 6),
+            ("idle_interval", 8),
+            ("entry_method", 3),
+        ],
+    )
+    def test_table_row_counts(
+        self, ds: TraceDataset, table: str, expected_rows: int
+    ) -> None:
+        assert getattr(ds, table).collect().height == expected_rows
 
     def test_missing_dir_raises(self, tmp_path) -> None:
         with pytest.raises(FileNotFoundError):

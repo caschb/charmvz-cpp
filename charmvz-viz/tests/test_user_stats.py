@@ -51,11 +51,6 @@ class TestDatasetAccessors:
 class TestUserStatsOverTime:
     """Catalog analysis 14."""
 
-    def test_produces_figure(self, instrumented_ds: TraceDataset) -> None:
-        fig = user_stats_over_time(instrumented_ds)
-        assert isinstance(fig, plt.Figure)
-        plt.close(fig)
-
     def test_one_line_per_stat(self, instrumented_ds: TraceDataset) -> None:
         fig = user_stats_over_time(instrumented_ds)
         assert len(fig.axes[0].get_lines()) == 2
@@ -153,11 +148,6 @@ class TestUserStatsOverTime:
 class TestUserStatsPerPe:
     """Catalog analysis 15."""
 
-    def test_produces_figure(self, instrumented_ds: TraceDataset) -> None:
-        fig = user_stats_per_pe(instrumented_ds)
-        assert isinstance(fig, plt.Figure)
-        plt.close(fig)
-
     def test_one_bar_group_per_stat(self, instrumented_ds: TraceDataset) -> None:
         fig = user_stats_per_pe(instrumented_ds)
         assert len(fig.axes[0].containers) == 2
@@ -192,11 +182,6 @@ class TestUserStatsPerPe:
 
 class TestMemoryUsage:
     """Catalog analysis 10."""
-
-    def test_produces_figure(self, instrumented_ds: TraceDataset) -> None:
-        fig = memory_usage(instrumented_ds)
-        assert isinstance(fig, plt.Figure)
-        plt.close(fig)
 
     def test_one_line_per_pe(self, instrumented_ds: TraceDataset) -> None:
         fig = memory_usage(instrumented_ds)
