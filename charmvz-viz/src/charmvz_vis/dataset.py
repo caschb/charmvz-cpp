@@ -216,15 +216,14 @@ class TraceDataset:
         pe_df = self.processing_element.collect()
         num_pes = pe_df["total_pes"][0]
         global_start = pe_df["global_start_us"][0]
-        # Time range: smallest aligned_begin_us to max(end_time_us - global_start_us)
-        begin_vals = pe_df["aligned_begin_us"].drop_nulls()
+        # Time range: smallest begin marker to largest end marker. The stored
+        # timestamps are already in the run's common frame (the runtime
+        # subtracts RC_GLOBAL_START_TIME before writing the logs), so the
+        # offset is metadata and must not be subtracted again.
+        begin_vals = pe_df["begin_time_us"].drop_nulls()
         end_vals = pe_df["end_time_us"].drop_nulls()
         t_start = int(begin_vals.min()) if len(begin_vals) > 0 else 0
-        t_end = (
-            int(end_vals.max() - global_start)
-            if len(end_vals) > 0 and global_start is not None
-            else 0
-        )
+        t_end = int(end_vals.max()) if len(end_vals) > 0 else 0
         self._pe_info = {
             "num_pes": int(num_pes),
             "global_start_us": int(global_start) if global_start is not None else 0,

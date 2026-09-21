@@ -47,6 +47,7 @@ constexpr auto kSts = "PROJECTIONS_ID \n"
 auto run(const TempTrace &trace) -> charmvz::LogParserResult {
   const auto sts = charmvz::parse_sts_file(trace.sts_path());
   charmvz::RcData rc;
+  rc.available = true;
   rc.global_start_time_us = 0;
   rc.global_end_time_us = 0;
   return charmvz::process_logs(trace.log_paths(), sts, rc, trace.out_dir(), -1);
@@ -115,8 +116,8 @@ TEST_CASE("Index arity follows the collection's ndims",
           "[log_parser][chare_index]") {
   SECTION("three dimensions") {
     TempTrace trace(kSts);
-    trace.add_log(0,
-                  begin_processing(12, 1, "1 2 3", 777) + end_processing(12, 1));
+    trace.add_log(0, begin_processing(12, 1, "1 2 3", 777) +
+                         end_processing(12, 1));
     run(trace);
 
     ParquetTable chares(trace.out_dir() + "/chare_instance.parquet");
@@ -168,17 +169,13 @@ TEST_CASE("Index arity follows the collection's ndims",
   }
 }
 
-TEST_CASE("An entry method absent from the STS falls back to four",
+TEST_CASE("An entry method absent from the STS aborts the conversion",
           "[log_parser][chare_index]") {
-  // A trace can reference an ep the STS does not describe. Guessing an array
-  // arity there would misparse; four matches the non-array layout and keeps the
-  // stream aligned.
+  // A trace can reference an ep the STS does not describe. There is then no
+  // arity to read the index block with; any guess desynchronises the rest of
+  // the record, so the record is unparseable and the run is rejected.
   TempTrace trace(kSts);
   trace.add_log(0, begin_processing(99, 1, "1 2 3 4", 111) +
                        end_processing(99, 1));
-  run(trace);
-
-  ParquetTable execs(trace.out_dir() + "/execution.parquet");
-  REQUIRE(execs.rows() == 1);
-  CHECK(execs.ints("start_cpu_us")[0] == 111);
+  CHECK_THROWS(run(trace));
 }

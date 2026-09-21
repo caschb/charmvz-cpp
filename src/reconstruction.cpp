@@ -1,4 +1,5 @@
 #include "reconstruction.h"
+#include "builders.h"
 #include "parquet_writer.h"
 #include "schema.h"
 #include <algorithm>
@@ -11,59 +12,113 @@
 
 namespace charmvz {
 
-void reconstruct_message_and_migration(const LogParserResult &log_data,
-                                       const RcData &rc_data,
-                                       const std::string &output_dir) {
-  spdlog::info("Starting Stage 3 reconstruction message and migrations");
+namespace {
 
-  // ProcessingElements
+// Rule 1. One row per valid PE log. The computation bounds are the marker
+// timestamps as the log holds them, in the same frame as every other stored
+// timestamp. `global_start_us` records the origin shift the runtime applied
+// before writing (0 when it applied none) and `aligned_begin_us` is the begin
+// marker in that already-shifted frame; both are NULL without a clock
+// reference.
+void write_processing_elements(const LogParserResult &log_data,
+                               const RcData &rc_data,
+                               const std::string &output_dir) {
   ParquetWriter pe_writer(charmvz::schema::processing_element(),
                           output_dir + "/processing_element.parquet");
   arrow::Int32Builder pe_pe_id, pe_total_pes;
   arrow::Int64Builder pe_begin, pe_end, pe_global, pe_dur, pe_align;
 
+  const bool clock = rc_data.clock_reference_usable();
   for (const auto &pe : log_data.pes) {
     PARQUET_THROW_NOT_OK(pe_pe_id.Append(pe.pe_id));
     PARQUET_THROW_NOT_OK(pe_total_pes.Append(pe.total_pes));
-    PARQUET_THROW_NOT_OK(
-        pe_begin.Append(pe.begin_time_us - rc_data.global_start_time_us));
-    if (pe.end_time_us > 0) {
-      PARQUET_THROW_NOT_OK(
-          pe_end.Append(pe.end_time_us - rc_data.global_start_time_us));
-      PARQUET_THROW_NOT_OK(pe_dur.Append(pe.end_time_us - pe.begin_time_us));
+    if (pe.has_begin_time) {
+      PARQUET_THROW_NOT_OK(pe_begin.Append(pe.begin_time_us));
+    } else {
+      PARQUET_THROW_NOT_OK(pe_begin.AppendNull());
+    }
+    if (pe.has_end_time) {
+      PARQUET_THROW_NOT_OK(pe_end.Append(pe.end_time_us));
     } else {
       PARQUET_THROW_NOT_OK(pe_end.AppendNull());
+    }
+    if (pe.has_begin_time && pe.has_end_time) {
+      PARQUET_THROW_NOT_OK(pe_dur.Append(pe.end_time_us - pe.begin_time_us));
+    } else {
       PARQUET_THROW_NOT_OK(pe_dur.AppendNull());
     }
-    PARQUET_THROW_NOT_OK(pe_global.Append(pe.global_start_us));
-    PARQUET_THROW_NOT_OK(
-        pe_align.Append(pe.begin_time_us - pe.global_start_us));
+    if (clock) {
+      PARQUET_THROW_NOT_OK(pe_global.Append(rc_data.global_start_time_us));
+    } else {
+      PARQUET_THROW_NOT_OK(pe_global.AppendNull());
+    }
+    if (clock && pe.has_begin_time) {
+      PARQUET_THROW_NOT_OK(pe_align.Append(pe.begin_time_us));
+    } else {
+      PARQUET_THROW_NOT_OK(pe_align.AppendNull());
+    }
   }
-  if (pe_pe_id.length() > 0) {
-    std::shared_ptr<arrow::Array> a_pe, a_total, a_b, a_e, a_g, a_d, a_a;
-    PARQUET_THROW_NOT_OK(pe_pe_id.Finish(&a_pe));
-    PARQUET_THROW_NOT_OK(pe_total_pes.Finish(&a_total));
-    PARQUET_THROW_NOT_OK(pe_begin.Finish(&a_b));
-    PARQUET_THROW_NOT_OK(pe_end.Finish(&a_e));
-    PARQUET_THROW_NOT_OK(pe_global.Finish(&a_g));
-    PARQUET_THROW_NOT_OK(pe_dur.Finish(&a_d));
-    PARQUET_THROW_NOT_OK(pe_align.Finish(&a_a));
-    auto batch = arrow::RecordBatch::Make(
-        charmvz::schema::processing_element(), a_pe->length(),
-        {a_pe, a_total, a_b, a_e, a_g, a_d, a_a});
-    pe_writer.WriteBatch(batch);
+  if (pe_pe_id.length() == 0)
+    return;
+  std::shared_ptr<arrow::Array> a_pe, a_total, a_b, a_e, a_g, a_d, a_a;
+  PARQUET_THROW_NOT_OK(pe_pe_id.Finish(&a_pe));
+  PARQUET_THROW_NOT_OK(pe_total_pes.Finish(&a_total));
+  PARQUET_THROW_NOT_OK(pe_begin.Finish(&a_b));
+  PARQUET_THROW_NOT_OK(pe_end.Finish(&a_e));
+  PARQUET_THROW_NOT_OK(pe_global.Finish(&a_g));
+  PARQUET_THROW_NOT_OK(pe_dur.Finish(&a_d));
+  PARQUET_THROW_NOT_OK(pe_align.Finish(&a_a));
+  auto batch = arrow::RecordBatch::Make(
+      charmvz::schema::processing_element(), a_pe->length(),
+      {a_pe, a_total, a_b, a_e, a_g, a_d, a_a});
+  pe_writer.WriteBatch(batch);
+}
+
+// Accumulates message.parquet rows and flushes them at ROW_GROUP_SIZE.
+class MessageRows {
+public:
+  explicit MessageRows(ParquetWriter &writer) : writer_(writer) {}
+
+  // A row with no receiver; every receiver-derived column is NULL.
+  void append_unmatched(const CreationRecord &cr, const int32_t *explicit_dst) {
+    append_common(cr);
+    if (explicit_dst != nullptr) {
+      PARQUET_THROW_NOT_OK(m_dst.Append(*explicit_dst));
+    } else {
+      PARQUET_THROW_NOT_OK(m_dst.AppendNull());
+    }
+    PARQUET_THROW_NOT_OK(m_recv.AppendNull());
+    PARQUET_THROW_NOT_OK(m_exec.AppendNull());
+    PARQUET_THROW_NOT_OK(m_e2e.AppendNull());
+    PARQUET_THROW_NOT_OK(m_end2end.AppendNull());
+    finish_row();
   }
 
-  // Messages
-  ParquetWriter msg_writer(charmvz::schema::message(),
-                           output_dir + "/message.parquet");
-  arrow::Int64Builder m_id, m_send, m_enq, m_recv, m_exec, m_s2e, m_e2e,
-      m_end2end;
-  arrow::Int32Builder m_src, m_evt, m_ep, m_idx, m_len, m_fan, m_dst;
-  arrow::BooleanBuilder m_bcast;
+  // A row whose receiver is `bp`. Cross-PE differences are computed only when
+  // `cross_pe_ok`: both clocks share a reference, or they are the same clock.
+  void append_matched(const CreationRecord &cr, const BeginProcessingRecord &bp,
+                      bool cross_pe_ok) {
+    append_common(cr);
+    PARQUET_THROW_NOT_OK(m_dst.Append(bp.dst_pe));
+    if (bp.has_recv_time) {
+      PARQUET_THROW_NOT_OK(m_recv.Append(bp.recv_time_us));
+    } else {
+      PARQUET_THROW_NOT_OK(m_recv.AppendNull());
+    }
+    PARQUET_THROW_NOT_OK(m_exec.Append(bp.exec_start_time_us));
+    if (cross_pe_ok) {
+      PARQUET_THROW_NOT_OK(
+          m_e2e.Append(bp.exec_start_time_us - enqueue_time(cr)));
+      PARQUET_THROW_NOT_OK(
+          m_end2end.Append(bp.exec_start_time_us - cr.send_time_us));
+    } else {
+      PARQUET_THROW_NOT_OK(m_e2e.AppendNull());
+      PARQUET_THROW_NOT_OK(m_end2end.AppendNull());
+    }
+    finish_row();
+  }
 
-  int64_t msg_count = 0;
-  auto flush_msg = [&]() {
+  void flush() {
     if (m_id.length() == 0)
       return;
     std::vector<std::shared_ptr<arrow::Array>> arrs(16);
@@ -85,75 +140,265 @@ void reconstruct_message_and_migration(const LogParserResult &log_data,
     PARQUET_THROW_NOT_OK(m_end2end.Finish(&arrs[15]));
     auto batch = arrow::RecordBatch::Make(charmvz::schema::message(),
                                           arrs[0]->length(), arrs);
-    msg_writer.WriteBatch(batch);
-  };
+    writer_.WriteBatch(batch);
+  }
 
-  for (const auto &kv : log_data.creation_map) {
-    msg_count++;
-    auto src_pe = std::get<0>(kv.first);
-    auto event = std::get<1>(kv.first);
-    const auto &cr = kv.second;
+  [[nodiscard]] auto rows() const -> int64_t { return msg_count_; }
 
-    PARQUET_THROW_NOT_OK(m_id.Append(msg_count));
-    PARQUET_THROW_NOT_OK(m_src.Append(src_pe));
-    PARQUET_THROW_NOT_OK(m_evt.Append(event));
+private:
+  // The moment the send call returned on the source PE, on that PE's clock:
+  // the CREATION timestamp plus the interval creationDone() recorded.
+  static auto enqueue_time(const CreationRecord &cr) -> int64_t {
+    return cr.send_time_us + cr.send_to_enqueue_us;
+  }
+
+  void append_common(const CreationRecord &cr) {
+    ++msg_count_;
+    PARQUET_THROW_NOT_OK(m_id.Append(msg_count_));
+    PARQUET_THROW_NOT_OK(m_src.Append(cr.src_pe));
+    PARQUET_THROW_NOT_OK(m_evt.Append(cr.event));
     PARQUET_THROW_NOT_OK(m_ep.Append(cr.ep_id));
     PARQUET_THROW_NOT_OK(m_idx.Append(cr.msg_idx));
     PARQUET_THROW_NOT_OK(m_len.Append(cr.msg_len));
-    PARQUET_THROW_NOT_OK(
-        m_send.Append(cr.send_time_us - rc_data.global_start_time_us));
-    if (cr.enqueue_time_us > 0) {
-      PARQUET_THROW_NOT_OK(
-          m_enq.Append(cr.enqueue_time_us - rc_data.global_start_time_us));
-    } else {
-      PARQUET_THROW_NOT_OK(m_enq.AppendNull());
-    }
+    PARQUET_THROW_NOT_OK(m_send.Append(cr.send_time_us));
+    PARQUET_THROW_NOT_OK(m_enq.Append(enqueue_time(cr)));
     PARQUET_THROW_NOT_OK(m_bcast.Append(cr.is_broadcast));
-    PARQUET_THROW_NOT_OK(m_fan.Append(cr.broadcast_fanout));
-
-    auto bp_it = log_data.begin_processing_map.find(kv.first);
-    if (bp_it != log_data.begin_processing_map.end()) {
-      PARQUET_THROW_NOT_OK(m_dst.Append(bp_it->second.dst_pe));
-      PARQUET_THROW_NOT_OK(m_recv.Append(bp_it->second.recv_time_us -
-                                         rc_data.global_start_time_us));
-      PARQUET_THROW_NOT_OK(m_exec.Append(bp_it->second.exec_start_time_us -
-                                         rc_data.global_start_time_us));
-      PARQUET_THROW_NOT_OK(m_s2e.AppendNull());
-      PARQUET_THROW_NOT_OK(m_e2e.AppendNull());
-      PARQUET_THROW_NOT_OK(m_end2end.AppendNull());
+    if (cr.is_broadcast) {
+      PARQUET_THROW_NOT_OK(m_fan.Append(cr.broadcast_fanout));
     } else {
-      PARQUET_THROW_NOT_OK(m_dst.AppendNull());
-      PARQUET_THROW_NOT_OK(m_recv.AppendNull());
-      PARQUET_THROW_NOT_OK(m_exec.AppendNull());
-      PARQUET_THROW_NOT_OK(m_s2e.AppendNull());
-      PARQUET_THROW_NOT_OK(m_e2e.AppendNull());
-      PARQUET_THROW_NOT_OK(m_end2end.AppendNull());
+      PARQUET_THROW_NOT_OK(m_fan.AppendNull());
+    }
+    PARQUET_THROW_NOT_OK(m_s2e.Append(cr.send_to_enqueue_us));
+  }
+
+  void finish_row() {
+    if (m_id.length() >= builders::ROW_GROUP_SIZE)
+      flush();
+  }
+
+  ParquetWriter &writer_;
+  int64_t msg_count_ = 0;
+  arrow::Int64Builder m_id, m_send, m_enq, m_recv, m_exec, m_s2e, m_e2e,
+      m_end2end;
+  arrow::Int32Builder m_src, m_evt, m_ep, m_idx, m_len, m_fan, m_dst;
+  arrow::BooleanBuilder m_bcast;
+};
+
+// Rules 6 and 7. One row per unicast, one per explicit multicast destination,
+// one per broadcast.
+//
+// A receiver is a BEGIN_PROCESSING carrying the creation's (src_pe, event)
+// whose entry method is the one the message was created for: both records
+// take eIdx from the same envelope, so a differing entry method means the
+// receiver's (pe, event) fields came from another envelope. This is not a
+// theoretical case. Messages delivered outside the traced send path keep
+// whatever those envelope fields last held, and on the ChaNGa reference trace
+// 23,859 of 4.23 M pairs matched on (src_pe, event) alone joined a creation to
+// an execution of a different entry method, some of them logged before the
+// creation existed.
+//
+// On the sending PE itself the two records share one clock, so a candidate
+// that started before the creation cannot have processed it and is passed
+// over. Across PEs no such test is possible without a synchronised clock, and
+// none is attempted.
+//
+// Where a destination still logged several candidates, they are one delivery
+// only in the one case the runtime documents: resumes of a threaded entry
+// method, logged by beginExecute(CmiObjId*) under the thread's entry point
+// ("dummy_thread_ep") and the serial of the message that started it, on the
+// same chare instance. The earliest of those is the record that processed the
+// message. Any other repetition (on the ChaNGa reference trace, 800 thousand
+// groups of CkCache fills with identical entry method, instance and length)
+// is a set of observations the pair cannot separate; the destination is
+// written with NULL receiver fields and diagnosed rather than resolved by
+// picking one.
+void write_messages(const LogParserResult &log_data, const RcData &rc_data,
+                    const std::string &output_dir) {
+  ParquetWriter msg_writer(charmvz::schema::message(),
+                           output_dir + "/message.parquet");
+  MessageRows rows(msg_writer);
+  const bool clock = rc_data.clock_reference_usable();
+
+  int64_t unmatched_unicasts = 0;
+  int64_t multi_pe_unicasts = 0;
+  int64_t unmatched_multicast_destinations = 0;
+  int64_t receivers_outside_multicast = 0;
+
+  int64_t repeated_deliveries = 0;
+  int64_t ambiguous_destinations = 0;
+
+  struct Candidate {
+    const BeginProcessingRecord *earliest;
+    bool ambiguous;
+  };
+  std::map<int32_t, Candidate> earliest_by_dst;
+  for (const auto &cr : log_data.creations) {
+    if (cr.is_broadcast) {
+      // No destination list exists, so nothing is matched (Rule 7).
+      rows.append_unmatched(cr, nullptr);
+      continue;
     }
 
-    if (m_id.length() >= 100000)
-      flush_msg();
-  }
-  flush_msg();
+    earliest_by_dst.clear();
+    auto [first, last] = log_data.begin_processing_map.equal_range(
+        std::make_tuple(cr.src_pe, cr.event));
+    for (auto it = first; it != last; ++it) {
+      const auto &bp = it->second;
+      if (bp.ep_id != cr.ep_id)
+        continue;
+      if (bp.dst_pe == cr.src_pe && bp.exec_start_time_us < cr.send_time_us)
+        continue;
+      auto [slot, inserted] =
+          earliest_by_dst.try_emplace(bp.dst_pe, Candidate{&bp, false});
+      if (inserted)
+        continue;
+      const auto &kept = *slot->second.earliest;
+      const bool verified_resume = log_data.thread_ep_id >= 0 &&
+                                   bp.ep_id == log_data.thread_ep_id &&
+                                   kept.instance_id == bp.instance_id;
+      if (verified_resume) {
+        ++repeated_deliveries;
+      } else {
+        slot->second.ambiguous = true;
+      }
+      if (bp.exec_start_time_us < kept.exec_start_time_us)
+        slot->second.earliest = &bp;
+    }
 
-  // MigrationEpisode (Rule 9): a migration is a change of PE between two
-  // consecutive executions of the same chare-array instance. Pack/unpack events
-  // are not involved -- see the comment on schema::migration_episode().
+    auto emit_to = [&](int32_t dst, const Candidate *candidate) {
+      if (candidate == nullptr) {
+        rows.append_unmatched(cr, &dst);
+        return;
+      }
+      if (candidate->ambiguous) {
+        ++ambiguous_destinations;
+        spdlog::debug("Creation (src_pe {}, event {}) has several receivers "
+                      "on PE {} that are not thread resumes; destination "
+                      "written without receiver fields",
+                      cr.src_pe, cr.event, dst);
+        rows.append_unmatched(cr, &dst);
+        return;
+      }
+      rows.append_matched(cr, *candidate->earliest, clock || dst == cr.src_pe);
+    };
+
+    if (!cr.dst_pes.empty()) {
+      for (const int32_t dst : cr.dst_pes) {
+        auto found = earliest_by_dst.find(dst);
+        if (found == earliest_by_dst.end()) {
+          ++unmatched_multicast_destinations;
+          emit_to(dst, nullptr);
+        } else {
+          emit_to(dst, &found->second);
+        }
+      }
+      for (const auto &[dst, candidate] : earliest_by_dst) {
+        if (std::find(cr.dst_pes.begin(), cr.dst_pes.end(), dst) ==
+            cr.dst_pes.end()) {
+          ++receivers_outside_multicast;
+          spdlog::warn("BEGIN_PROCESSING on PE {} carries (src_pe {}, event "
+                       "{}) of a multicast whose destination list omits it; "
+                       "not linked",
+                       dst, cr.src_pe, cr.event);
+        }
+      }
+      continue;
+    }
+
+    if (earliest_by_dst.empty()) {
+      ++unmatched_unicasts;
+      rows.append_unmatched(cr, nullptr);
+      continue;
+    }
+    if (earliest_by_dst.size() > 1) {
+      // One CREATION with receivers of its own entry method on several PEs.
+      // The trace cannot say which of them the message reached, so every
+      // receiving PE gets a row and none is silently preferred. (On the
+      // ChaNGa reference trace this never happens once the entry method is
+      // required; without it, 7,478 creations matched stale envelopes on
+      // other PEs.)
+      ++multi_pe_unicasts;
+      spdlog::debug("Creation (src_pe {}, event {}) was processed on {} PEs; "
+                    "one row per receiving PE",
+                    cr.src_pe, cr.event, earliest_by_dst.size());
+    }
+    for (const auto &[dst, candidate] : earliest_by_dst)
+      emit_to(dst, &candidate);
+  }
+  rows.flush();
+
+  spdlog::info("Wrote {} message rows from {} creations", rows.rows(),
+               log_data.creations.size());
+  if (unmatched_unicasts > 0)
+    spdlog::info("{} unicast creations have no receiver", unmatched_unicasts);
+  if (unmatched_multicast_destinations > 0)
+    spdlog::info("{} multicast destinations have no receiver",
+                 unmatched_multicast_destinations);
+  if (multi_pe_unicasts > 0)
+    spdlog::warn("{} single-message creations have receivers on more than "
+                 "one PE; one row per receiving PE",
+                 multi_pe_unicasts);
+  if (repeated_deliveries > 0)
+    spdlog::info("{} thread-resume BEGIN_PROCESSING records were folded into "
+                 "the execution that started their thread",
+                 repeated_deliveries);
+  if (ambiguous_destinations > 0)
+    spdlog::warn("{} destinations had several receivers under one (src_pe, "
+                 "event) that are not thread resumes; written without "
+                 "receiver fields",
+                 ambiguous_destinations);
+  if (receivers_outside_multicast > 0)
+    spdlog::warn("{} receivers fall outside their multicast's destination list",
+                 receivers_outside_multicast);
+  if (!clock)
+    spdlog::warn("No clock reference: enqueue_to_exec_us and end_to_end_us "
+                 "are NULL except for messages a PE sent to itself");
+}
+
+// Rule 9. A migration is a change of PE between two consecutive executions of
+// the same chare-array instance. Pack/unpack events are not involved -- see
+// the comment on schema::migration_episode().
+void write_migrations(const LogParserResult &log_data, const RcData &rc_data,
+                      const std::string &output_dir) {
   ParquetWriter mig_writer(charmvz::schema::migration_episode(),
                            output_dir + "/migration_episode.parquet");
-  spdlog::info("Writing MigrationEpisode.parquet");
+  if (!rc_data.clock_reference_usable()) {
+    // Ordering executions across PEs compares their clocks, which nothing
+    // relates without the run's reference.
+    spdlog::warn("No clock reference: migration_episode.parquet is empty");
+    return;
+  }
 
   arrow::Int64Builder mig_id, mig_inst, src_end, dst_start, gap;
   arrow::Int32Builder mig_coll, mig_src, mig_dst, mig_seq;
+  auto flush = [&]() {
+    if (mig_id.length() == 0)
+      return;
+    std::vector<std::shared_ptr<arrow::Array>> arrays(9);
+    PARQUET_THROW_NOT_OK(mig_id.Finish(&arrays[0]));
+    PARQUET_THROW_NOT_OK(mig_inst.Finish(&arrays[1]));
+    PARQUET_THROW_NOT_OK(mig_coll.Finish(&arrays[2]));
+    PARQUET_THROW_NOT_OK(mig_src.Finish(&arrays[3]));
+    PARQUET_THROW_NOT_OK(mig_dst.Finish(&arrays[4]));
+    PARQUET_THROW_NOT_OK(src_end.Finish(&arrays[5]));
+    PARQUET_THROW_NOT_OK(dst_start.Finish(&arrays[6]));
+    PARQUET_THROW_NOT_OK(gap.Finish(&arrays[7]));
+    PARQUET_THROW_NOT_OK(mig_seq.Finish(&arrays[8]));
+    auto batch = arrow::RecordBatch::Make(charmvz::schema::migration_episode(),
+                                          arrays[0]->length(), arrays);
+    mig_writer.WriteBatch(batch);
+  };
 
   // Group executions by instance, then order each instance's executions in
-  // time. Timestamps are already aligned to the global start, so they are
-  // comparable across PEs.
+  // time. The runtime wrote every PE's timestamps in the run's common frame,
+  // so they compare across PEs up to the unrecorded per-PE clock offset.
   std::unordered_map<int64_t, std::vector<const InstanceLocationRecord *>>
       by_instance;
   for (const auto &loc : log_data.instance_locations)
     by_instance[loc.instance_id].push_back(&loc);
 
   int64_t migration_id = 0;
+  int64_t unbounded_hops = 0;
 
   for (auto &[instance_id, locations] : by_instance) {
     std::sort(
@@ -169,8 +414,17 @@ void reconstruct_message_and_migration(const LogParserResult &log_data,
       if (previous->pe_id == current->pe_id)
         continue;
 
-      ++migration_id;
+      // The hop is counted even when it cannot be written, so a later hop's
+      // ordinal still says how many preceded it.
       ++sequence;
+      if (!previous->has_end_time) {
+        // The source-side end is a non-null column and the execution never
+        // ended in the log; the transition is observed but has no bounds.
+        ++unbounded_hops;
+        continue;
+      }
+
+      ++migration_id;
       PARQUET_THROW_NOT_OK(mig_id.Append(migration_id));
       PARQUET_THROW_NOT_OK(mig_inst.Append(instance_id));
       PARQUET_THROW_NOT_OK(mig_coll.Append(current->collection_id));
@@ -181,24 +435,27 @@ void reconstruct_message_and_migration(const LogParserResult &log_data,
       PARQUET_THROW_NOT_OK(
           gap.Append(current->start_time_us - previous->end_time_us));
       PARQUET_THROW_NOT_OK(mig_seq.Append(sequence));
+      if (mig_id.length() >= builders::ROW_GROUP_SIZE)
+        flush();
     }
   }
+  flush();
+  spdlog::info("Wrote {} migration episodes", migration_id);
+  if (unbounded_hops > 0)
+    spdlog::warn("{} PE transitions follow an execution with no "
+                 "END_PROCESSING and were not written",
+                 unbounded_hops);
+}
 
-  if (mig_id.length() > 0) {
-    std::vector<std::shared_ptr<arrow::Array>> arrays(9);
-    PARQUET_THROW_NOT_OK(mig_id.Finish(&arrays[0]));
-    PARQUET_THROW_NOT_OK(mig_inst.Finish(&arrays[1]));
-    PARQUET_THROW_NOT_OK(mig_coll.Finish(&arrays[2]));
-    PARQUET_THROW_NOT_OK(mig_src.Finish(&arrays[3]));
-    PARQUET_THROW_NOT_OK(mig_dst.Finish(&arrays[4]));
-    PARQUET_THROW_NOT_OK(src_end.Finish(&arrays[5]));
-    PARQUET_THROW_NOT_OK(dst_start.Finish(&arrays[6]));
-    PARQUET_THROW_NOT_OK(gap.Finish(&arrays[7]));
-    PARQUET_THROW_NOT_OK(mig_seq.Finish(&arrays[8]));
-    auto batch = arrow::RecordBatch::Make(charmvz::schema::migration_episode(),
-                                          arrays[0]->length(), arrays);
-    mig_writer.WriteBatch(batch);
-  }
+} // namespace
+
+void reconstruct_message_and_migration(const LogParserResult &log_data,
+                                       const RcData &rc_data,
+                                       const std::string &output_dir) {
+  spdlog::info("Starting Stage 3 reconstruction message and migrations");
+  write_processing_elements(log_data, rc_data, output_dir);
+  write_messages(log_data, rc_data, output_dir);
+  write_migrations(log_data, rc_data, output_dir);
 }
 
 void reconstruct_simulation_steps(const LogParserResult &log_data,

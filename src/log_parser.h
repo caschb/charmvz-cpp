@@ -29,15 +29,22 @@ struct TupleHash {
   }
 };
 
+// One CREATION / CREATION_BCAST / CREATION_MULTICAST record, kept in log
+// order. `send_to_enqueue_us` is the record's last field: creationDone()
+// (charm/src/ck-perf/trace-projections.C) stores `curTime - log.time`, the
+// source-side interval from the CREATION to the moment the send call returned
+// after _CldEnqueue(). It is a duration on the source PE's clock, not a
+// destination timestamp, and zero is a legitimate value.
 struct CreationRecord {
+  int32_t src_pe;
+  int32_t event;
   int32_t ep_id;
   int32_t msg_idx;
   int32_t msg_len;
   int64_t send_time_us;
-  int64_t enqueue_time_us;
+  int64_t send_to_enqueue_us;
   bool is_broadcast;
   int32_t broadcast_fanout;
-  int32_t src_pe;
   std::vector<int32_t> dst_pes;
 };
 
@@ -47,20 +54,28 @@ struct CreationRecord {
 // groups and nodegroups have one instance resident on every PE and never
 // migrate, so including them would report every hop between their per-PE
 // instances as a migration.
+//
+// An execution whose END_PROCESSING is missing is still a location: leaving it
+// out would let the sequence step from the execution before it to the one
+// after it as if the element had never been observed in between.
 struct InstanceLocationRecord {
   int64_t instance_id;
   int32_t collection_id;
   int32_t pe_id;
   int64_t start_time_us;
   int64_t end_time_us;
+  bool has_end_time;
 };
 
+// One row of processing_element.parquet: exactly one per valid PE log, whether
+// or not the log carries its computation markers.
 struct ProcessingElementRecord {
   int32_t pe_id;
   int32_t total_pes;
   int64_t begin_time_us;
+  bool has_begin_time;
   int64_t end_time_us;
-  int64_t global_start_us;
+  bool has_end_time;
 };
 
 struct ChareInstanceRecord {
@@ -74,9 +89,21 @@ struct ChareInstanceRecord {
   int32_t index_5;
 };
 
+// The receiver side of a message: one BEGIN_PROCESSING, retained under the
+// (src_pe, event) pair its `pe` and `event` fields carry. `recv_time_us` is the
+// record's irecvtime; the runtime writes -1 when it has no value
+// (`has_recv_time` false), and beginExecuteLocal() otherwise passes a constant
+// 0.0, so the field is retained as written rather than interpreted.
+// `instance_id` and `msg_len` are what tells a repeated processing of one
+// delivery (a threaded entry method logs a BEGIN_PROCESSING per resume) from
+// two different observations that happen to share the pair.
 struct BeginProcessingRecord {
   int32_t dst_pe;
+  int32_t ep_id;
+  int64_t instance_id;
+  int32_t msg_len;
   int64_t recv_time_us;
+  bool has_recv_time;
   int64_t exec_start_time_us;
 };
 
@@ -137,19 +164,46 @@ struct StepBoundaryRecord {
   bool has_end_time;
 };
 
+// Counts of the records Stage 2 could not pair, so a run's completeness is
+// visible without grepping the log output.
+struct LogParseDiagnostics {
+  int64_t malformed_records = 0;
+  int64_t incomplete_executions = 0;
+  int64_t orphan_end_processing = 0;
+  int64_t mismatched_end_processing = 0;
+  int64_t duplicate_open_executions = 0;
+  int64_t incomplete_idle_intervals = 0;
+  int64_t orphan_end_idle = 0;
+  int64_t logs_without_begin_computation = 0;
+  int64_t logs_without_end_computation = 0;
+};
+
 struct LogParserResult {
-  std::unordered_map<std::tuple<int32_t, int32_t>, CreationRecord, TupleHash>
-      creation_map;
+  // The STS index of the runtime's "dummy_thread_ep", or -1 when the STS
+  // registers none. A BEGIN_PROCESSING of this entry method is a resume of a
+  // threaded entry method (beginExecute(CmiObjId*)), logged under the serial
+  // of the message that started the thread; it is the only case in which
+  // several receivers under one pair are known to be one delivery.
+  int32_t thread_ep_id = -1;
+  // In log order; a (src_pe, event) pair that the runtime reuses appears as
+  // many times as it was written, never collapsed.
+  std::vector<CreationRecord> creations;
   std::vector<InstanceLocationRecord> instance_locations;
   std::vector<ProcessingElementRecord> pes;
+  LogParseDiagnostics diagnostics;
   // Keyed on (collection_id, index_0 .. index_5) -- the chare instance's
   // natural key.
   std::unordered_map<
       std::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>,
       ChareInstanceRecord, TupleHash>
       chare_instances;
-  std::unordered_map<std::tuple<int32_t, int32_t>, BeginProcessingRecord,
-                     TupleHash>
+  // Every BEGIN_PROCESSING keyed on its (pe, event) fields. A multimap because
+  // the pair is not unique on the receiving side: a multicast is processed on
+  // each of its destinations, and a threaded entry method logs one
+  // BEGIN_PROCESSING per resume under the serial of the message that started
+  // it.
+  std::unordered_multimap<std::tuple<int32_t, int32_t>, BeginProcessingRecord,
+                          TupleHash>
       begin_processing_map;
   // Empty unless a step-boundary user event was configured and found. Small by
   // construction -- one entry per (timestep, PE) -- so it is accumulated in
@@ -159,6 +213,10 @@ struct LogParserResult {
 
 // `step_event_id` selects the registered user event whose brackets delimit a
 // timestep; pass NO_STEP_EVENT to skip step reconstruction entirely.
+//
+// Throws std::runtime_error when a BEGIN_PROCESSING names an entry method the
+// STS does not register: its index arity is then unknown and the rest of the
+// record cannot be read, so the conversion aborts rather than guessing.
 constexpr int32_t NO_STEP_EVENT = -1;
 
 auto process_logs(const std::vector<std::string> &log_file_paths,

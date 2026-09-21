@@ -3,8 +3,9 @@
 // Both record types were skipped by the dispatch switch until the two entities
 // were added, and both carry a field-order trap that produces a well-typed but
 // wrong table when read in the order the rest of the format uses. The field
-// orders asserted here were checked against charm/src/ck-perf/trace-projections.C
-// (the `pup` switch at lines 770-782), not against the format note.
+// orders asserted here were checked against
+// charm/src/ck-perf/trace-projections.C (the `pup` switch at lines 770-782),
+// not against the format note.
 
 #include "log_parser.h"
 #include "rc_parser.h"
@@ -39,6 +40,7 @@ auto run(const TempTrace &trace, int64_t global_start_us = 0)
     -> charmvz::LogParserResult {
   const auto sts = charmvz::parse_sts_file(trace.sts_path());
   charmvz::RcData rc;
+  rc.available = true;
   rc.global_start_time_us = global_start_us;
   rc.global_end_time_us = 0;
   return charmvz::process_logs(trace.log_paths(), sts, rc, trace.out_dir(),
@@ -106,8 +108,10 @@ TEST_CASE("USER_STAT keeps the fractional part of the application's time",
   CHECK(*user_time[0] == Approx(0.375));
 }
 
-TEST_CASE("USER_STAT timestamps are aligned against the global start",
+TEST_CASE("USER_STAT timestamps are stored as the log holds them",
           "[user_stat]") {
+  // The runtime already subtracted RC_GLOBAL_START_TIME from every record
+  // before writing the log, so a nonzero value must not be applied again.
   TempTrace trace(kStsWithStats);
   trace.add_log(0, "32 5000 -1 1.0 0 0\n");
   run(trace, 1500);
@@ -115,7 +119,7 @@ TEST_CASE("USER_STAT timestamps are aligned against the global start",
   ParquetTable table(trace.out_dir() + "/user_stat.parquet");
   const auto time_us = table.ints("time_us");
   REQUIRE(time_us.size() == 1);
-  CHECK(*time_us[0] == 3500);
+  CHECK(*time_us[0] == 5000);
 }
 
 TEST_CASE("USER_STAT with an unregistered stat id keeps a NULL name",
@@ -232,7 +236,8 @@ TEST_CASE("MEMORY_USAGE_CURRENT is attributed to the log file's PE",
   CHECK(*pe1_bytes == 8192);
 }
 
-TEST_CASE("MEMORY_USAGE_CURRENT timestamps are aligned", "[memory_sample]") {
+TEST_CASE("MEMORY_USAGE_CURRENT timestamps are stored as the log holds them",
+          "[memory_sample]") {
   TempTrace trace(kStsWithStats);
   trace.add_log(0, "27 4096 5000\n");
   run(trace, 1500);
@@ -240,7 +245,7 @@ TEST_CASE("MEMORY_USAGE_CURRENT timestamps are aligned", "[memory_sample]") {
   ParquetTable table(trace.out_dir() + "/memory_sample.parquet");
   const auto time_us = table.ints("time_us");
   REQUIRE(time_us.size() == 1);
-  CHECK(*time_us[0] == 3500);
+  CHECK(*time_us[0] == 5000);
 }
 
 TEST_CASE("A byte count above 2^31 survives the round trip",

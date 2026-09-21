@@ -12,12 +12,12 @@
 #include <parquet/arrow/reader.h>
 
 #include <cstdint>
-#include <unistd.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace charmvz::test {
@@ -65,8 +65,19 @@ public:
     log_paths_.push_back(path.string());
   }
 
+  // Writes the run's .projrc. Without this call rc_path() names a file that
+  // does not exist, which is how a test drives the no-clock-reference path.
+  void add_projrc(int64_t global_start_us, int64_t global_end_us) {
+    std::ofstream out(rc_path());
+    out << "RC_GLOBAL_START_TIME " << global_start_us << "\n"
+        << "RC_GLOBAL_END_TIME   " << global_end_us << "\n";
+  }
+
   [[nodiscard]] auto sts_path() const -> std::string {
     return (root_ / "logs" / "test.sts").string();
+  }
+  [[nodiscard]] auto rc_path() const -> std::string {
+    return (root_ / "logs" / "test.projrc").string();
   }
   [[nodiscard]] auto log_paths() const -> const std::vector<std::string> & {
     return log_paths_;
@@ -95,6 +106,28 @@ public:
   }
 
   [[nodiscard]] auto rows() const -> int64_t { return table_->num_rows(); }
+
+  [[nodiscard]] auto schema() const -> std::shared_ptr<arrow::Schema> {
+    return table_->schema();
+  }
+
+  [[nodiscard]] auto bools(const std::string &column) const
+      -> std::vector<std::optional<bool>> {
+    auto chunked = table_->GetColumnByName(column);
+    REQUIRE(chunked != nullptr);
+    std::vector<std::optional<bool>> values;
+    for (const auto &chunk : chunked->chunks()) {
+      auto array = std::static_pointer_cast<arrow::BooleanArray>(chunk);
+      for (int64_t i = 0; i < array->length(); ++i) {
+        if (array->IsNull(i)) {
+          values.emplace_back(std::nullopt);
+        } else {
+          values.emplace_back(array->Value(i));
+        }
+      }
+    }
+    return values;
+  }
 
   [[nodiscard]] auto ints(const std::string &column) const
       -> std::vector<std::optional<int64_t>> {

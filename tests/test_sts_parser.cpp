@@ -35,8 +35,8 @@ private:
 };
 
 // The projections-specific block always precedes the user-event block, and
-// VERSION is mandatory, so every fixture needs this preamble.
-constexpr auto kPreamble = "PROJECTIONS_ID \nVERSION 11.0\n";
+// VERSION and PROCESSORS are mandatory, so every fixture needs this preamble.
+constexpr auto kPreamble = "PROJECTIONS_ID \nVERSION 11.0\nPROCESSORS 1\n";
 
 } // namespace
 
@@ -169,6 +169,25 @@ TEST_CASE("EVENT parsing does not disturb the other STS records",
 }
 
 TEST_CASE("An unsupported STS VERSION is rejected", "[sts]") {
-  TempStsFile sts("PROJECTIONS_ID \nVERSION 10.0\nEND\n");
+  TempStsFile sts("PROJECTIONS_ID \nVERSION 10.0\nPROCESSORS 1\nEND\n");
   CHECK_THROWS(charmvz::parse_sts_file(sts.path()));
+}
+
+TEST_CASE("Mandatory STS metadata is required", "[sts]") {
+  SECTION("a missing file aborts rather than yielding an empty registry") {
+    CHECK_THROWS(charmvz::parse_sts_file("/nonexistent/charmvz.sts"));
+  }
+  SECTION("PROCESSORS is mandatory") {
+    // total_pes is a non-null column of every ProcessingElement row.
+    TempStsFile sts("PROJECTIONS_ID \nVERSION 11.0\nEND\n");
+    CHECK_THROWS(charmvz::parse_sts_file(sts.path()));
+  }
+  SECTION("an entry method must name a registered chare") {
+    // The chare's ndims decides how many index values a BEGIN_PROCESSING of
+    // this entry method carries; without it the record cannot be read.
+    TempStsFile sts(std::string(kPreamble) + "CHARE 0 \"Main\" -1\n"
+                                             "ENTRY CHARE 1 \"orphan()\" 7 0\n"
+                                             "END\n");
+    CHECK_THROWS(charmvz::parse_sts_file(sts.path()));
+  }
 }

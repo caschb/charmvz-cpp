@@ -44,6 +44,7 @@ constexpr auto kSts = "PROJECTIONS_ID \n"
 void run(const TempTrace &trace) {
   const auto sts = charmvz::parse_sts_file(trace.sts_path());
   charmvz::RcData rc;
+  rc.available = true;
   rc.global_start_time_us = 0;
   rc.global_end_time_us = 0;
   const auto result =

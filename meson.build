@@ -46,6 +46,7 @@ charmvz_lib = library(
         'src/rc_parser.cpp',
         'src/log_parser.cpp',
         'src/reconstruction.cpp',
+        'src/metadata_tables.cpp',
         'src/parquet_writer.cpp',
         'src/builders.cpp',
         'src/schema.cpp',
@@ -65,7 +66,7 @@ executable(
 # Tests are skipped when Catch2 is not installed, so a plain build never
 # requires it.
 if catch2_dep.found()
-    foreach unit : ['sts_parser', 'parquet_writer', 'log_parser', 'chare_index', 'migration', 'user_stat']
+    foreach unit : ['sts_parser', 'parquet_writer', 'log_parser', 'chare_index', 'migration', 'user_stat', 'reconstruction']
         test(
             unit,
             executable(

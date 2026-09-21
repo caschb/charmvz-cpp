@@ -29,8 +29,11 @@ auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
   StsData data;
   std::ifstream f{std::string(sts_file_path)};
   if (!f.is_open()) {
+    // Every log record names its entities by STS index, so without the
+    // registry nothing in a log can be interpreted. Abort rather than emit
+    // well-typed tables of unresolvable integers.
     spdlog::error("Cannot open STS file: {}", sts_file_path);
-    return data;
+    throw std::runtime_error("Missing STS file");
   }
 
   std::string line;
@@ -128,6 +131,20 @@ auto parse_sts_file(const std::string_view sts_file_path) -> StsData {
   if (data.version.empty()) {
     spdlog::error("STS file is missing VERSION");
     throw std::runtime_error("Missing STS VERSION");
+  }
+  if (data.total_pes <= 0) {
+    spdlog::error("STS file is missing PROCESSORS");
+    throw std::runtime_error("Missing STS PROCESSORS");
+  }
+  // BEGIN_PROCESSING's index arity is the owning collection's ndims, so an
+  // entry method whose collection is unregistered cannot be parsed at all.
+  for (const auto &ep : data.entries) {
+    if (!data.chare_map.contains(ep.collection_id)) {
+      spdlog::error("STS ENTRY {} (\"{}\") names chare {} which has no CHARE "
+                    "record",
+                    ep.ep_id, ep.name, ep.collection_id);
+      throw std::runtime_error("STS entry method with unregistered chare");
+    }
   }
 
   return data;

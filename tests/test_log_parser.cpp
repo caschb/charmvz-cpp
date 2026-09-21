@@ -67,6 +67,7 @@ auto run_pipeline(const TempTrace &trace, const std::string &step_event_name)
     -> charmvz::LogParserResult {
   const auto sts = charmvz::parse_sts_file(trace.sts_path());
   charmvz::RcData rc;
+  rc.available = true;
   rc.global_start_time_us = 0;
   rc.global_end_time_us = 0;
   const int32_t step_event_id =
@@ -423,4 +424,57 @@ TEST_CASE("User-event parsing leaves the execution stream intact",
   ParquetTable idle(trace.out_dir() + "/idle_interval.parquet");
   CHECK(idle.rows() == 2);
   CHECK(idle.ints("duration_us")[1] == 100);
+}
+
+TEST_CASE("Partial step brackets keep their per-PE envelope",
+          "[log_parser][simulation_step][incomplete]") {
+  // PE 0 brackets step 3 twice, the second time without closing it; PE 1
+  // closes its bracket. The per-PE row keeps the minimum start and the
+  // maximum end that was seen, the global extent unions the PEs, and the
+  // reporting count is the number of PEs, not of brackets.
+  TempTrace trace(kStsWithEvents);
+  trace.add_log(0, "98 4 1000 10 0 3\n"
+                   "99 4 1400 11 0 3\n"
+                   "98 4 1600 12 0 3\n");
+  trace.add_log(1, "98 4 1100 10 0 3\n"
+                   "99 4 2000 11 0 3\n");
+  run_pipeline(trace, "SimulationStep");
+
+  ParquetTable steps(trace.out_dir() + "/simulation_step.parquet");
+  REQUIRE(steps.rows() == 2);
+  const auto pe_id = steps.ints("pe_id");
+  const auto start = steps.ints("start_time_us");
+  const auto end = steps.ints("end_time_us");
+  const auto duration = steps.ints("duration_us");
+  const auto global_start = steps.ints("global_start_time_us");
+  const auto global_end = steps.ints("global_end_time_us");
+  const auto pe_count = steps.ints("pe_count");
+  std::map<int64_t, size_t> by_pe;
+  for (size_t i = 0; i < pe_id.size(); ++i)
+    by_pe.emplace(*pe_id[i], i);
+
+  CHECK(start[by_pe.at(0)] == 1000);
+  CHECK(end[by_pe.at(0)] == 1400);
+  CHECK(duration[by_pe.at(0)] == 400);
+  CHECK(start[by_pe.at(1)] == 1100);
+  CHECK(end[by_pe.at(1)] == 2000);
+  for (size_t i = 0; i < pe_id.size(); ++i) {
+    CHECK(global_start[i] == 1000);
+    CHECK(global_end[i] == 2000);
+    CHECK(pe_count[i] == 2);
+  }
+
+  SECTION("a step no PE closed has NULL ends throughout") {
+    TempTrace open_trace(kStsWithEvents);
+    open_trace.add_log(0, "98 4 5000 20 0 4\n");
+    open_trace.add_log(1, "98 4 5100 20 0 4\n");
+    run_pipeline(open_trace, "SimulationStep");
+    ParquetTable open_steps(open_trace.out_dir() + "/simulation_step.parquet");
+    REQUIRE(open_steps.rows() == 2);
+    CHECK(open_steps.ints("global_start_time_us")[0] == 5000);
+    CHECK_FALSE(open_steps.ints("end_time_us")[0].has_value());
+    CHECK_FALSE(open_steps.ints("duration_us")[0].has_value());
+    CHECK_FALSE(open_steps.ints("global_end_time_us")[0].has_value());
+    CHECK(open_steps.ints("pe_count")[0] == 2);
+  }
 }

@@ -7,31 +7,48 @@
 #include <arrow/builder.h>
 #include <filesystem>
 #include <limits>
+#include <map>
+#include <optional>
 #include <regex>
 #include <spdlog/spdlog.h>
 #include <sstream>
+#include <stdexcept>
+#include <utility>
 
 namespace charmvz {
 
 namespace {
 
-// How many chare-index values a BEGIN_PROCESSING record carries for this entry
-// point. Per charm/src/ck-perf/trace-projections.C, an array chare writes
-// exactly `ndims` values (as short int when ndims >= 4, as int otherwise --
-// indistinguishable in the text format, where only the count matters), while a
-// non-array chare (ndims == -1) writes four. Reading a fixed four would consume
-// icputime as an index for 3D arrays and leave three values unread for 6D ones.
-auto chare_index_arity(const StsData &sts_data, uint16_t ep_id) -> int32_t {
+// The collection an entry method belongs to and how many chare-index values
+// its BEGIN_PROCESSING records carry. Per charm/src/ck-perf/trace-projections.C
+// (LogEntry::pup, case BEGIN_PROCESSING), an array chare writes exactly `ndims`
+// values (as short int when ndims >= 4, as int otherwise -- indistinguishable
+// in the text format, where only the count matters), while a non-array chare
+// (ndims == -1) writes four. Reading a fixed four would consume icputime as an
+// index for 3D arrays and leave three values unread for 6D ones.
+//
+// An entry method the STS does not register therefore cannot be parsed at all:
+// there is no arity to read the record with, and guessing one desynchronises
+// every field after the index block. parse_sts_file() already guarantees that a
+// registered entry method's collection exists.
+struct ResolvedEntry {
+  int32_t collection_id;
+  int32_t index_arity;
+};
+
+auto resolve_entry(const StsData &sts_data, uint16_t ep_id, int32_t pe_id)
+    -> ResolvedEntry {
   auto ep_it = sts_data.ep_map.find(ep_id);
-  if (ep_it == sts_data.ep_map.end())
-    return NON_ARRAY_INDEX_COUNT;
-
-  auto chare_it = sts_data.chare_map.find(ep_it->second.collection_id);
-  if (chare_it == sts_data.chare_map.end())
-    return NON_ARRAY_INDEX_COUNT;
-
-  const int32_t ndims = chare_it->second.ndims;
-  return ndims >= 1 ? ndims : NON_ARRAY_INDEX_COUNT;
+  if (ep_it == sts_data.ep_map.end()) {
+    spdlog::error("BEGIN_PROCESSING on PE {} names entry method {} which the "
+                  "STS does not register; the record cannot be parsed",
+                  pe_id, ep_id);
+    throw std::runtime_error("Unregistered entry method in log");
+  }
+  const int32_t ndims =
+      sts_data.chare_map.at(ep_it->second.collection_id).ndims;
+  return {ep_it->second.collection_id,
+          ndims >= 1 ? ndims : NON_ARRAY_INDEX_COUNT};
 }
 
 // Only chare arrays (STS ndims >= 1) can migrate between PEs. Groups and
@@ -78,6 +95,12 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                   const std::string &output_dir, int32_t step_event_id)
     -> LogParserResult {
   LogParserResult result;
+  for (const auto &ep : sts_data.entries) {
+    if (ep.name == "dummy_thread_ep") {
+      result.thread_ep_id = ep.ep_id;
+      break;
+    }
+  }
 
   auto exec_schema = charmvz::schema::execution(sts_data.papi_event_names);
   charmvz::ParquetWriter exec_writer(exec_schema,
@@ -101,7 +124,10 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
   builders::UserStatBuilder user_stat_builder(user_stat_writer);
   builders::MemorySampleBuilder memory_sample_builder(memory_sample_writer);
 
-  const int64_t global_start_us = rc_data.global_start_time_us;
+  // Timestamps are stored as the logs hold them: when the runtime computed a
+  // start offset it already subtracted it from every record before writing
+  // (see RcData), so nothing is subtracted here.
+  (void)rc_data;
 
   for (const auto &log_path : log_file_paths) {
     spdlog::info("Processing log: {}", log_path);
@@ -126,8 +152,49 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
     std::string line;
     std::getline(log_stream, line);
 
-    LogEntry last_begin_idle{};
-    std::unordered_map<int32_t, LogEntry> open_processing_entries;
+    // One ProcessingElement row per valid log, whether or not the markers
+    // that bound its computation were written.
+    ProcessingElementRecord pe_record{};
+    pe_record.pe_id = current_pe_id;
+    pe_record.total_pes = sts_data.total_pes;
+
+    // Idle state is explicit: an END_IDLE with nothing open is diagnosed and
+    // dropped, never paired with a previous interval's start.
+    std::optional<LogEntry> open_idle;
+
+    // Keyed on the (source PE, serial) pair both records carry: END_PROCESSING
+    // repeats execPe and execEvent (trace-projections.C, endExecuteLocal), so
+    // two sources whose serials coincide never close each other's execution.
+    // Ordered so that whatever is still open at end of file is emitted
+    // deterministically.
+    std::map<std::pair<int32_t, int32_t>, LogEntry> open_processing_entries;
+
+    // Closes one execution. `end` is null when no END_PROCESSING was seen.
+    auto emit_execution = [&](const LogEntry &begin, const LogEntry *end) {
+      const auto entry = resolve_entry(sts_data, begin.eIdx, current_pe_id);
+      auto chare_tup =
+          std::make_tuple(entry.collection_id, begin.id[0], begin.id[1],
+                          begin.id[2], begin.id[3], begin.id[4], begin.id[5]);
+      int64_t inst_id = -1;
+      auto inst_it = result.chare_instances.find(chare_tup);
+      if (inst_it != result.chare_instances.end())
+        inst_id = inst_it->second.instance_id;
+
+      exec_builder.Append(begin, end, current_pe_id, inst_id);
+
+      // Retain this execution's location so Stage 3 can detect migrations as
+      // changes of PE. Only chare arrays migrate, so skip everything else.
+      if (inst_id >= 0 && is_chare_array(sts_data, entry.collection_id)) {
+        InstanceLocationRecord loc;
+        loc.instance_id = inst_id;
+        loc.collection_id = entry.collection_id;
+        loc.pe_id = current_pe_id;
+        loc.start_time_us = static_cast<int64_t>(begin.itime);
+        loc.has_end_time = end != nullptr;
+        loc.end_time_us = end != nullptr ? static_cast<int64_t>(end->itime) : 0;
+        result.instance_locations.push_back(loc);
+      }
+    };
 
     // USER_EVENT_PAIR writes its begin and its end as two records sharing one
     // `event` serial (trace-projections.C:1093-1096), so they pair on that.
@@ -171,12 +238,30 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       }
     };
 
+    // A record whose required fields could not all be read is a truncated
+    // line, typically the last one of a log cut off mid-write. Its defaulted
+    // zeros must not reach any table or pairing state.
+    auto malformed = [&](std::istringstream &iss, LogType type) {
+      if (iss)
+        return false;
+      spdlog::warn("Malformed {} record on PE {} ({}); skipped",
+                   to_string(type), current_pe_id, line);
+      ++result.diagnostics.malformed_records;
+      return true;
+    };
+
     while (std::getline(log_stream, line)) {
       if (line.empty())
         continue;
       std::istringstream iss(line);
       int token = 0;
       iss >> token;
+      if (!iss) {
+        ++result.diagnostics.malformed_records;
+        spdlog::warn("Unreadable record on PE {} ({}); skipped", current_pe_id,
+                     line);
+        continue;
+      }
       LogType type = static_cast<LogType>(token);
 
       LogEntry e{};
@@ -196,26 +281,30 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         } else if (type == LogType::CREATION_BCAST) {
           iss >> e.numpes;
         }
+        if (malformed(iss, type))
+          break;
         CreationRecord cr;
+        cr.src_pe = current_pe_id;
+        cr.event = e.event;
         cr.ep_id = e.eIdx;
         cr.msg_idx = e.mIdx;
         cr.msg_len = e.msglen;
-        cr.send_time_us = e.itime;
-        cr.enqueue_time_us = e.irecvtime;
+        cr.send_time_us = static_cast<int64_t>(e.itime);
+        cr.send_to_enqueue_us = static_cast<int64_t>(e.irecvtime);
         cr.is_broadcast = (type == LogType::CREATION_BCAST);
-        cr.broadcast_fanout = (type == LogType::CREATION_BCAST) ? e.numpes : 1;
-        cr.src_pe = current_pe_id;
+        cr.broadcast_fanout = (type == LogType::CREATION_BCAST) ? e.numpes : 0;
         if (type == LogType::CREATION_MULTICAST)
-          cr.dst_pes = e.pes;
-
-        result.creation_map[std::make_tuple(current_pe_id, e.event)] = cr;
+          cr.dst_pes = std::move(e.pes);
+        result.creations.push_back(std::move(cr));
         break;
       }
       case LogType::BEGIN_PROCESSING: {
         iss >> e.mIdx >> e.eIdx >> e.itime >> e.event >> e.pe >> e.msglen >>
             e.irecvtime;
-        const int32_t index_arity = chare_index_arity(sts_data, e.eIdx);
-        for (int32_t i = 0; i < index_arity; ++i) {
+        if (malformed(iss, type))
+          break;
+        const auto entry = resolve_entry(sts_data, e.eIdx, current_pe_id);
+        for (int32_t i = 0; i < entry.index_arity; ++i) {
           int32_t index_value = 0;
           iss >> index_value;
           if (i < static_cast<int32_t>(CHARE_INDEX_SLOTS)) {
@@ -230,28 +319,17 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
             e.papiValues[i] = papi_value;
           }
         }
-        open_processing_entries[e.event] = e;
+        if (malformed(iss, type))
+          break;
 
-        BeginProcessingRecord bp;
-        bp.dst_pe = current_pe_id;
-        bp.recv_time_us = e.irecvtime;
-        bp.exec_start_time_us = e.itime;
-        result.begin_processing_map[std::make_tuple(e.pe, e.event)] = bp;
-
-        int32_t cid = sts_data.entries.empty()
-                          ? 0
-                          : sts_data.entries.front().collection_id;
-        auto ep_it = sts_data.ep_map.find(e.eIdx);
-        if (ep_it != sts_data.ep_map.end())
-          cid = ep_it->second.collection_id;
-
-        auto chare_tup = std::make_tuple(cid, e.id[0], e.id[1], e.id[2],
-                                         e.id[3], e.id[4], e.id[5]);
+        auto chare_tup = std::make_tuple(entry.collection_id, e.id[0], e.id[1],
+                                         e.id[2], e.id[3], e.id[4], e.id[5]);
         if (result.chare_instances.find(chare_tup) ==
             result.chare_instances.end()) {
           ChareInstanceRecord inst;
-          inst.instance_id = result.chare_instances.size() + 1;
-          inst.collection_id = cid;
+          inst.instance_id =
+              static_cast<int64_t>(result.chare_instances.size()) + 1;
+          inst.collection_id = entry.collection_id;
           inst.index_0 = e.id[0];
           inst.index_1 = e.id[1];
           inst.index_2 = e.id[2];
@@ -260,6 +338,34 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
           inst.index_5 = e.id[5];
           result.chare_instances[chare_tup] = inst;
           chare_builder.Append(inst);
+        }
+
+        BeginProcessingRecord bp;
+        bp.dst_pe = current_pe_id;
+        bp.ep_id = e.eIdx;
+        bp.instance_id = result.chare_instances.at(chare_tup).instance_id;
+        bp.msg_len = e.msglen;
+        bp.has_recv_time = e.irecvtime != std::numeric_limits<uint64_t>::max();
+        bp.recv_time_us =
+            bp.has_recv_time ? static_cast<int64_t>(e.irecvtime) : 0;
+        bp.exec_start_time_us = static_cast<int64_t>(e.itime);
+        result.begin_processing_map.emplace(std::make_tuple(e.pe, e.event), bp);
+
+        auto [open_it, inserted] = open_processing_entries.try_emplace(
+            std::make_pair(e.pe, e.event), e);
+        if (!inserted) {
+          // Two BEGIN_PROCESSING records share a serial with no END between
+          // them. (pe_id, event) is the table's key, so the pair cannot be
+          // told apart downstream; both observations are still written, the
+          // earlier one as incomplete, rather than one silently replacing
+          // the other.
+          spdlog::warn("Repeated BEGIN_PROCESSING for (src_pe {}, event {}) "
+                       "on PE {} before its END_PROCESSING; the earlier "
+                       "execution is written with NULL end fields",
+                       e.pe, e.event, current_pe_id);
+          ++result.diagnostics.duplicate_open_executions;
+          emit_execution(open_it->second, nullptr);
+          open_it->second = e;
         }
         break;
       }
@@ -273,56 +379,66 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
             e.papiValues[i] = papi_value;
           }
         }
+        // A truncated END leaves its BEGIN open rather than closing it with
+        // defaulted zeros.
+        if (malformed(iss, type))
+          break;
 
-        auto begin_it = open_processing_entries.find(e.event);
+        auto begin_it =
+            open_processing_entries.find(std::make_pair(e.pe, e.event));
         if (begin_it == open_processing_entries.end()) {
-          spdlog::warn("Missing BEGIN_PROCESSING for event {} on PE {}",
-                       e.event, current_pe_id);
+          // Nothing to pair with and no start fields to write: the row's
+          // start time and index tuple only exist on the BEGIN record.
+          spdlog::warn("END_PROCESSING for (src_pe {}, event {}) on PE {} at "
+                       "{} us has no open BEGIN_PROCESSING; dropped",
+                       e.pe, e.event, current_pe_id, e.itime);
+          ++result.diagnostics.orphan_end_processing;
           break;
         }
-
-        const LogEntry &begin = begin_it->second;
-        int32_t cid = 0;
-        auto ep_it = sts_data.ep_map.find(begin.eIdx);
-        if (ep_it != sts_data.ep_map.end())
-          cid = ep_it->second.collection_id;
-
-        auto chare_tup =
-            std::make_tuple(cid, begin.id[0], begin.id[1], begin.id[2],
-                            begin.id[3], begin.id[4], begin.id[5]);
-        int64_t inst_id = -1;
-        auto inst_it = result.chare_instances.find(chare_tup);
-        if (inst_it != result.chare_instances.end())
-          inst_id = inst_it->second.instance_id;
-
-        exec_builder.Append(begin, e, current_pe_id,
-                            rc_data.global_start_time_us, inst_id);
-
-        // Retain this execution's location so Stage 3 can detect migrations as
-        // changes of PE. Only chare arrays migrate, so skip everything else.
-        if (inst_id >= 0 && is_chare_array(sts_data, cid)) {
-          InstanceLocationRecord loc;
-          loc.instance_id = inst_id;
-          loc.collection_id = cid;
-          loc.pe_id = current_pe_id;
-          loc.start_time_us =
-              static_cast<int64_t>(begin.itime) - rc_data.global_start_time_us;
-          loc.end_time_us =
-              static_cast<int64_t>(e.itime) - rc_data.global_start_time_us;
-          result.instance_locations.push_back(loc);
+        if (begin_it->second.eIdx != e.eIdx) {
+          // The runtime repeats the entry method on the END record
+          // (endExecuteLocal writes execEp), so a different one means this
+          // END does not belong to that BEGIN. The BEGIN stays open.
+          spdlog::warn("END_PROCESSING for (src_pe {}, event {}) on PE {} "
+                       "names entry method {} but the open BEGIN_PROCESSING "
+                       "names {}; dropped",
+                       e.pe, e.event, current_pe_id, e.eIdx,
+                       begin_it->second.eIdx);
+          ++result.diagnostics.mismatched_end_processing;
+          break;
         }
-
+        emit_execution(begin_it->second, &e);
         open_processing_entries.erase(begin_it);
         break;
       }
       case LogType::BEGIN_IDLE: {
         iss >> e.itime >> e.pe;
-        last_begin_idle = e;
+        if (malformed(iss, type))
+          break;
+        if (open_idle) {
+          spdlog::warn("BEGIN_IDLE at {} us on PE {} while the idle interval "
+                       "from {} us is still open; the earlier one is written "
+                       "with a NULL end",
+                       e.itime, current_pe_id, open_idle->itime);
+          ++result.diagnostics.incomplete_idle_intervals;
+          idle_builder.Append(current_pe_id, *open_idle, nullptr);
+        }
+        open_idle = e;
         break;
       }
       case LogType::END_IDLE: {
         iss >> e.itime >> e.pe;
-        idle_builder.Append(last_begin_idle, e, rc_data.global_start_time_us);
+        if (malformed(iss, type))
+          break;
+        if (!open_idle) {
+          spdlog::warn("END_IDLE at {} us on PE {} has no open BEGIN_IDLE; "
+                       "dropped",
+                       e.itime, current_pe_id);
+          ++result.diagnostics.orphan_end_idle;
+          break;
+        }
+        idle_builder.Append(current_pe_id, *open_idle, &e);
+        open_idle.reset();
         break;
       }
       // BEGIN_PACK / END_PACK / BEGIN_UNPACK / END_UNPACK are deliberately not
@@ -332,24 +448,34 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       // schema::migration_episode().
       case LogType::BEGIN_COMPUTATION: {
         iss >> e.itime;
-        ProcessingElementRecord per;
-        per.pe_id = current_pe_id;
-        per.total_pes = sts_data.total_pes;
-        per.begin_time_us = e.itime;
-        per.global_start_us = rc_data.global_start_time_us;
-        result.pes.push_back(per);
+        if (malformed(iss, type))
+          break;
+        if (pe_record.has_begin_time) {
+          spdlog::warn("Repeated BEGIN_COMPUTATION on PE {}; keeping the first",
+                       current_pe_id);
+          break;
+        }
+        pe_record.begin_time_us = static_cast<int64_t>(e.itime);
+        pe_record.has_begin_time = true;
         break;
       }
       case LogType::END_COMPUTATION: {
         iss >> e.itime;
-        for (auto &per : result.pes) {
-          if (per.pe_id == current_pe_id)
-            per.end_time_us = e.itime;
+        if (malformed(iss, type))
+          break;
+        if (pe_record.has_end_time) {
+          spdlog::warn("Repeated END_COMPUTATION on PE {}; keeping the first",
+                       current_pe_id);
+          break;
         }
+        pe_record.end_time_us = static_cast<int64_t>(e.itime);
+        pe_record.has_end_time = true;
         break;
       }
       case LogType::USER_EVENT: {
         iss >> e.mIdx >> e.itime >> e.event >> e.pe;
+        if (malformed(iss, type))
+          break;
         UserEventOccurrence occurrence{};
         occurrence.pe_id = current_pe_id;
         occurrence.record_type = static_cast<int32_t>(type);
@@ -357,19 +483,19 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         occurrence.has_user_event_id = true;
         occurrence.event = e.event;
         occurrence.has_event = true;
-        occurrence.start_time_us =
-            static_cast<int64_t>(e.itime) - global_start_us;
+        occurrence.start_time_us = static_cast<int64_t>(e.itime);
         attach_user_event_name(sts_data, occurrence);
         user_event_builder.Append(occurrence);
         break;
       }
       case LogType::USER_SUPPLIED: {
         iss >> e.userSuppliedData >> e.itime;
+        if (malformed(iss, type))
+          break;
         UserEventOccurrence occurrence{};
         occurrence.pe_id = current_pe_id;
         occurrence.record_type = static_cast<int32_t>(type);
-        occurrence.start_time_us =
-            static_cast<int64_t>(e.itime) - global_start_us;
+        occurrence.start_time_us = static_cast<int64_t>(e.itime);
         occurrence.user_supplied_int = e.userSuppliedData;
         occurrence.has_user_supplied_int = true;
         user_event_builder.Append(occurrence);
@@ -377,12 +503,13 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       }
       case LogType::USER_SUPPLIED_NOTE: {
         iss >> e.itime;
+        if (malformed(iss, type))
+          break;
         e.userSuppliedNote = read_pup_string(iss);
         UserEventOccurrence occurrence{};
         occurrence.pe_id = current_pe_id;
         occurrence.record_type = static_cast<int32_t>(type);
-        occurrence.start_time_us =
-            static_cast<int64_t>(e.itime) - global_start_us;
+        occurrence.start_time_us = static_cast<int64_t>(e.itime);
         occurrence.note = e.userSuppliedNote;
         occurrence.has_note = true;
         user_event_builder.Append(occurrence);
@@ -390,16 +517,16 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       }
       case LogType::USER_SUPPLIED_BRACKETED_NOTE: {
         iss >> e.itime >> e.iEndTime >> e.event;
+        if (malformed(iss, type))
+          break;
         e.userSuppliedNote = read_pup_string(iss);
         UserEventOccurrence occurrence{};
         occurrence.pe_id = current_pe_id;
         occurrence.record_type = static_cast<int32_t>(type);
         occurrence.event = e.event;
         occurrence.has_event = true;
-        occurrence.start_time_us =
-            static_cast<int64_t>(e.itime) - global_start_us;
-        occurrence.end_time_us =
-            static_cast<int64_t>(e.iEndTime) - global_start_us;
+        occurrence.start_time_us = static_cast<int64_t>(e.itime);
+        occurrence.end_time_us = static_cast<int64_t>(e.iEndTime);
         occurrence.has_end_time = true;
         occurrence.note = e.userSuppliedNote;
         occurrence.has_note = true;
@@ -411,6 +538,8 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         // -- their LogEntry constructor never assigns it, so it is 0 on every
         // PE. Attribution uses the PE the log file belongs to.
         iss >> e.mIdx >> e.itime >> e.event >> e.pe >> e.nestedID;
+        if (malformed(iss, type))
+          break;
         auto open_it = open_event_pairs.find(e.event);
         if (open_it == open_event_pairs.end()) {
           open_event_pairs[e.event] = e;
@@ -418,20 +547,23 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         }
         const LogEntry &begin = open_it->second;
         emit_bracket(static_cast<int32_t>(type), begin.mIdx, begin.event,
-                     begin.nestedID,
-                     static_cast<int64_t>(begin.itime) - global_start_us,
-                     static_cast<int64_t>(e.itime) - global_start_us, true);
+                     begin.nestedID, static_cast<int64_t>(begin.itime),
+                     static_cast<int64_t>(e.itime), true);
         open_event_pairs.erase(open_it);
         break;
       }
       case LogType::BEGIN_USER_EVENT_PAIR: {
         iss >> e.mIdx >> e.itime >> e.event >> e.pe >> e.nestedID;
+        if (malformed(iss, type))
+          break;
         open_brackets[std::make_tuple(static_cast<int32_t>(e.mIdx), e.nestedID)]
             .push_back(e);
         break;
       }
       case LogType::END_USER_EVENT_PAIR: {
         iss >> e.mIdx >> e.itime >> e.event >> e.pe >> e.nestedID;
+        if (malformed(iss, type))
+          break;
         auto key = std::make_tuple(static_cast<int32_t>(e.mIdx), e.nestedID);
         auto open_it = open_brackets.find(key);
         if (open_it == open_brackets.end() || open_it->second.empty()) {
@@ -442,16 +574,15 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                        "event {} (nestedID {}) on PE {}",
                        e.mIdx, e.nestedID, current_pe_id);
           emit_bracket(static_cast<int32_t>(type), e.mIdx, e.event, e.nestedID,
-                       static_cast<int64_t>(e.itime) - global_start_us, 0,
-                       false);
+                       static_cast<int64_t>(e.itime), 0, false);
           break;
         }
         const LogEntry begin = open_it->second.back();
         open_it->second.pop_back();
         emit_bracket(static_cast<int32_t>(LogType::BEGIN_USER_EVENT_PAIR),
                      begin.mIdx, begin.event, begin.nestedID,
-                     static_cast<int64_t>(begin.itime) - global_start_us,
-                     static_cast<int64_t>(e.itime) - global_start_us, true);
+                     static_cast<int64_t>(begin.itime),
+                     static_cast<int64_t>(e.itime), true);
         break;
       }
       case LogType::USER_STAT: {
@@ -461,10 +592,12 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         // record's `pe` is genuine (CkMyPe()) but is read and discarded, since
         // every table in this schema keys on the log file's PE.
         iss >> e.itime >> e.statTime >> e.stat >> e.pe >> e.mIdx;
+        if (malformed(iss, type))
+          break;
         UserStatSample sample{};
         sample.pe_id = current_pe_id;
         sample.stat_id = e.mIdx;
-        sample.time_us = static_cast<int64_t>(e.itime) - global_start_us;
+        sample.time_us = static_cast<int64_t>(e.itime);
         sample.stat_value = e.stat;
         // updateStat() records -1 for "the application supplied no time"
         // (trace-projections.C:1144-1148).
@@ -483,9 +616,11 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         // every other record uses (trace-projections.C:770-772), and the
         // record carries no PE field at all.
         iss >> e.memUsage >> e.itime;
+        if (malformed(iss, type))
+          break;
         MemorySample sample{};
         sample.pe_id = current_pe_id;
-        sample.time_us = static_cast<int64_t>(e.itime) - global_start_us;
+        sample.time_us = static_cast<int64_t>(e.itime);
         sample.bytes = static_cast<int64_t>(e.memUsage);
         memory_sample_builder.Append(sample);
         break;
@@ -495,17 +630,41 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       }
     }
 
-    // Brackets still open at end of file: the run was cut short, or tracing
-    // ended inside the bracket. Emit them with no end timestamp so the
-    // occurrence is still visible.
+    // Whatever is still open at end of file was cut short by the end of the
+    // log, not by the application. Each is written with NULL end fields so the
+    // observation survives and its incompleteness is visible.
+    for (const auto &[key, begin] : open_processing_entries) {
+      spdlog::warn("BEGIN_PROCESSING for (src_pe {}, event {}) on PE {} has no "
+                   "END_PROCESSING before end of log; written with NULL end "
+                   "fields",
+                   key.first, key.second, current_pe_id);
+      ++result.diagnostics.incomplete_executions;
+      emit_execution(begin, nullptr);
+    }
+    if (open_idle) {
+      spdlog::warn("BEGIN_IDLE at {} us on PE {} has no END_IDLE before end "
+                   "of log; written with a NULL end",
+                   open_idle->itime, current_pe_id);
+      ++result.diagnostics.incomplete_idle_intervals;
+      idle_builder.Append(current_pe_id, *open_idle, nullptr);
+    }
+    if (!pe_record.has_begin_time) {
+      spdlog::warn("PE {} log has no BEGIN_COMPUTATION", current_pe_id);
+      ++result.diagnostics.logs_without_begin_computation;
+    }
+    if (!pe_record.has_end_time) {
+      spdlog::warn("PE {} log has no END_COMPUTATION", current_pe_id);
+      ++result.diagnostics.logs_without_end_computation;
+    }
+    result.pes.push_back(pe_record);
+
     for (const auto &[event_serial, begin] : open_event_pairs) {
       spdlog::warn("Unmatched USER_EVENT_PAIR record for event serial {} on "
                    "PE {}",
                    event_serial, current_pe_id);
       emit_bracket(static_cast<int32_t>(LogType::USER_EVENT_PAIR), begin.mIdx,
                    begin.event, begin.nestedID,
-                   static_cast<int64_t>(begin.itime) - global_start_us, 0,
-                   false);
+                   static_cast<int64_t>(begin.itime), 0, false);
     }
     for (const auto &[key, stack] : open_brackets) {
       for (const auto &begin : stack) {
@@ -514,8 +673,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                      std::get<0>(key), std::get<1>(key), current_pe_id);
         emit_bracket(static_cast<int32_t>(LogType::BEGIN_USER_EVENT_PAIR),
                      begin.mIdx, begin.event, begin.nestedID,
-                     static_cast<int64_t>(begin.itime) - global_start_us, 0,
-                     false);
+                     static_cast<int64_t>(begin.itime), 0, false);
       }
     }
   }

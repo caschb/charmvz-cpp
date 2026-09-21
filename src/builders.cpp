@@ -13,9 +13,8 @@ ExecutionBuilder::ExecutionBuilder(ParquetWriter &writer,
       total_papi_events_(std::clamp(total_papi_events, 0,
                                     static_cast<int32_t>(NUMPAPIEVENTS))) {}
 
-void ExecutionBuilder::Append(const LogEntry &begin, const LogEntry &end,
-                              int32_t execution_pe_id, int64_t global_start_us,
-                              int64_t inst_id) {
+void ExecutionBuilder::Append(const LogEntry &begin, const LogEntry *end,
+                              int32_t execution_pe_id, int64_t inst_id) {
   PARQUET_THROW_NOT_OK(pe_id.Append(execution_pe_id));
   PARQUET_THROW_NOT_OK(event.Append(begin.event));
   if (inst_id >= 0) {
@@ -28,35 +27,46 @@ void ExecutionBuilder::Append(const LogEntry &begin, const LogEntry &end,
   PARQUET_THROW_NOT_OK(msg_idx.Append(begin.mIdx));
   PARQUET_THROW_NOT_OK(msg_len.Append(begin.msglen));
 
-  int64_t aligned_start = static_cast<int64_t>(begin.itime) - global_start_us;
-  int64_t aligned_end = static_cast<int64_t>(end.itime) - global_start_us;
-  PARQUET_THROW_NOT_OK(start_time_us.Append(aligned_start));
-  if (begin.irecvtime == std::numeric_limits<uint64_t>::max()) {
-    PARQUET_THROW_NOT_OK(recv_time_us.AppendNull());
+  PARQUET_THROW_NOT_OK(start_time_us.Append(static_cast<int64_t>(begin.itime)));
+  // The runtime writes -1 (as the unsigned maximum) when it has no receive
+  // time. Any other value, including 0, is stored as written.
+  const bool has_recv = begin.irecvtime != std::numeric_limits<uint64_t>::max();
+  if (has_recv) {
+    PARQUET_THROW_NOT_OK(
+        recv_time_us.Append(static_cast<int64_t>(begin.irecvtime)));
   } else {
-    PARQUET_THROW_NOT_OK(recv_time_us.Append(
-        static_cast<int64_t>(begin.irecvtime) - global_start_us));
+    PARQUET_THROW_NOT_OK(recv_time_us.AppendNull());
   }
   PARQUET_THROW_NOT_OK(start_cpu_us.Append(begin.icputime));
 
-  PARQUET_THROW_NOT_OK(end_time_us.Append(aligned_end));
-  PARQUET_THROW_NOT_OK(end_cpu_us.Append(end.icputime));
+  if (end != nullptr) {
+    PARQUET_THROW_NOT_OK(end_time_us.Append(static_cast<int64_t>(end->itime)));
+    PARQUET_THROW_NOT_OK(end_cpu_us.Append(end->icputime));
+  } else {
+    PARQUET_THROW_NOT_OK(end_time_us.AppendNull());
+    PARQUET_THROW_NOT_OK(end_cpu_us.AppendNull());
+  }
 
   auto append_papi_triplet = [&](arrow::Int64Builder &begin_builder,
                                  arrow::Int64Builder &end_builder,
                                  arrow::Int64Builder &delta_builder,
                                  size_t index) {
-    if (static_cast<int32_t>(index) < total_papi_events_) {
-      const int64_t begin_value = static_cast<int64_t>(begin.papiValues[index]);
-      const int64_t end_value = static_cast<int64_t>(end.papiValues[index]);
-      PARQUET_THROW_NOT_OK(begin_builder.Append(begin_value));
-      PARQUET_THROW_NOT_OK(end_builder.Append(end_value));
-      PARQUET_THROW_NOT_OK(delta_builder.Append(end_value - begin_value));
-    } else {
+    if (static_cast<int32_t>(index) >= total_papi_events_) {
       PARQUET_THROW_NOT_OK(begin_builder.AppendNull());
       PARQUET_THROW_NOT_OK(end_builder.AppendNull());
       PARQUET_THROW_NOT_OK(delta_builder.AppendNull());
+      return;
     }
+    const int64_t begin_value = static_cast<int64_t>(begin.papiValues[index]);
+    PARQUET_THROW_NOT_OK(begin_builder.Append(begin_value));
+    if (end == nullptr) {
+      PARQUET_THROW_NOT_OK(end_builder.AppendNull());
+      PARQUET_THROW_NOT_OK(delta_builder.AppendNull());
+      return;
+    }
+    const int64_t end_value = static_cast<int64_t>(end->papiValues[index]);
+    PARQUET_THROW_NOT_OK(end_builder.Append(end_value));
+    PARQUET_THROW_NOT_OK(delta_builder.Append(end_value - begin_value));
   };
 
   append_papi_triplet(papi_begin_0, papi_end_0, papi_delta_0, 0);
@@ -66,17 +76,22 @@ void ExecutionBuilder::Append(const LogEntry &begin, const LogEntry &end,
   append_papi_triplet(papi_begin_4, papi_end_4, papi_delta_4, 4);
   append_papi_triplet(papi_begin_5, papi_end_5, papi_delta_5, 5);
 
-  PARQUET_THROW_NOT_OK(wall_duration_us.Append(
-      static_cast<int64_t>(end.itime) - static_cast<int64_t>(begin.itime)));
-  PARQUET_THROW_NOT_OK(
-      cpu_duration_us.Append(static_cast<int64_t>(end.icputime) -
-                             static_cast<int64_t>(begin.icputime)));
-  if (begin.irecvtime == std::numeric_limits<uint64_t>::max()) {
-    PARQUET_THROW_NOT_OK(queue_wait_us.AppendNull());
+  if (end != nullptr) {
+    PARQUET_THROW_NOT_OK(wall_duration_us.Append(
+        static_cast<int64_t>(end->itime) - static_cast<int64_t>(begin.itime)));
+    PARQUET_THROW_NOT_OK(
+        cpu_duration_us.Append(static_cast<int64_t>(end->icputime) -
+                               static_cast<int64_t>(begin.icputime)));
   } else {
+    PARQUET_THROW_NOT_OK(wall_duration_us.AppendNull());
+    PARQUET_THROW_NOT_OK(cpu_duration_us.AppendNull());
+  }
+  if (has_recv) {
     PARQUET_THROW_NOT_OK(
         queue_wait_us.Append(static_cast<int64_t>(begin.itime) -
                              static_cast<int64_t>(begin.irecvtime)));
+  } else {
+    PARQUET_THROW_NOT_OK(queue_wait_us.AppendNull());
   }
 
   TryFlush();
@@ -152,14 +167,19 @@ void ExecutionBuilder::Flush() {
 IdleIntervalBuilder::IdleIntervalBuilder(ParquetWriter &writer)
     : writer_(writer), schema_(charmvz::schema::idle_interval()) {}
 
-void IdleIntervalBuilder::Append(const LogEntry &begin, const LogEntry &end,
-                                 int64_t global_start_us) {
-  PARQUET_THROW_NOT_OK(pe_id.Append(begin.pe));
-  int64_t start_align = begin.itime - global_start_us;
-  int64_t end_align = end.itime - global_start_us;
-  PARQUET_THROW_NOT_OK(start_time_us.Append(start_align));
-  PARQUET_THROW_NOT_OK(end_time_us.Append(end_align));
-  PARQUET_THROW_NOT_OK(duration_us.Append(end_align - start_align));
+void IdleIntervalBuilder::Append(int32_t idle_pe_id, const LogEntry &begin,
+                                 const LogEntry *end) {
+  PARQUET_THROW_NOT_OK(pe_id.Append(idle_pe_id));
+  const int64_t start = static_cast<int64_t>(begin.itime);
+  PARQUET_THROW_NOT_OK(start_time_us.Append(start));
+  if (end != nullptr) {
+    const int64_t end_value = static_cast<int64_t>(end->itime);
+    PARQUET_THROW_NOT_OK(end_time_us.Append(end_value));
+    PARQUET_THROW_NOT_OK(duration_us.Append(end_value - start));
+  } else {
+    PARQUET_THROW_NOT_OK(end_time_us.AppendNull());
+    PARQUET_THROW_NOT_OK(duration_us.AppendNull());
+  }
   TryFlush();
 }
 

@@ -13,8 +13,10 @@ class ExecutionBuilder {
 public:
   ExecutionBuilder(ParquetWriter &writer, std::shared_ptr<arrow::Schema> schema,
                    int32_t total_papi_events);
-  void Append(const LogEntry &begin, const LogEntry &end, int32_t pe_id,
-              int64_t global_start_us, int64_t instance_id);
+  // `end` is null for an execution whose END_PROCESSING was never seen; every
+  // end-derived column is then NULL.
+  void Append(const LogEntry &begin, const LogEntry *end, int32_t pe_id,
+              int64_t instance_id);
   void Flush();
   void TryFlush() {
     if (pe_id.length() >= ROW_GROUP_SIZE)
@@ -64,8 +66,8 @@ private:
 class IdleIntervalBuilder {
 public:
   IdleIntervalBuilder(ParquetWriter &writer);
-  void Append(const LogEntry &begin, const LogEntry &end,
-              int64_t global_start_us);
+  // `end` is null for a BEGIN_IDLE that was never closed.
+  void Append(int32_t pe_id, const LogEntry &begin, const LogEntry *end);
   void Flush();
   void TryFlush() {
     if (pe_id.length() >= ROW_GROUP_SIZE)
