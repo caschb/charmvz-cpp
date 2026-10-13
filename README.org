@@ -6,7 +6,7 @@ The repository also contains [[file:charmvz-viz/][charmvz-viz]], a Python packag
 
 ** Status
 
-Working. The pipeline builds, runs end to end, and processes the project's reference traces correctly: a 4-PE ChaNGa trace (6.6M executions) in about 25 s, and the two 80-PE LeanMD traces. Row counts for all three are pinned as regression baselines.
+Working. The pipeline builds, runs end to end, and processes the project's reference traces correctly: a 4-PE ChaNGa trace (6.6M executions) in about 25 s, and the two 80-PE LeanMD traces.
 
 Two caveats worth knowing before relying on it:
 
@@ -21,10 +21,11 @@ CharmVZ bridges Charm++ performance tracing and modern data analysis. [[https://
 
 - *Streaming*: logs are parsed line by line and flushed in row groups, so a multi-gigabyte trace never lands in memory at once
 - *Transparent decompression*: plain ~.log~ and gzipped ~.log.gz~ are read the same way, and a single trace directory may mix both
-- *Normalized schema*: 11 tables with explicit keys, rather than one flat event dump
+- *Normalized schema*: 13 tables with explicit keys, rather than one flat event dump
 - *Precomputed derived columns*: durations, queue waits and PAPI deltas are stored, not recomputed downstream
 - *Compressed output*: ZSTD by default, measured 2.54x smaller than Parquet's uncompressed default for about 7% more wall time
-- *Application semantics*: user events are materialized, and application-declared timesteps become a first-class dimension
+- *Application semantics*: user events, user statistics and memory samples are materialized, and application-declared timesteps become a first-class dimension
+- *Explicit incompleteness*: a record whose end was never logged is written with NULL end fields and counted, never dropped silently or paired with an invented start
 
 ** Installation
 
@@ -146,14 +147,14 @@ run. The test suite passes under this configuration against Arrow 25.0.0.
 | ~-o~, ~--output~ | yes | Directory for the Parquet output; created if absent |
 | ~-s~, ~--step-event~ | no | Name of the registered user event that delimits a timestep (default ~SimulationStep~) |
 
-The whole trace directory is passed at once, not a single file: CharmVZ discovers the ~.sts~, the ~.projrc~ and every log inside it, and needs all of them to align timestamps across PEs.
+The whole trace directory is passed at once, not a single file: CharmVZ discovers the ~.sts~, the ~.projrc~ and every per-PE log inside it. Only files named ~<pgm>.<pe>.log~ or ~<pgm>.<pe>.log.gz~ are read as logs; any other ~.gz~ in the directory, such as an archive of the trace itself, is ignored with a warning. A missing ~.sts~ aborts the conversion. A missing ~.projrc~ only produces a warning, but disables the cross-PE derivations described under [[*Timestamps and the clock reference][Timestamps and the clock reference]].
 
 *** Input files
 
 Standard Charm++ Projections output, produced by building with ~-tracemode projections~ and running with ~+traceroot~:
 
 - ~<pgm>.sts~ -- symbol table: chare, entry-method, message and user-event names; PE count; PAPI counter names
-- ~<pgm>.projrc~ -- global start and end time, needed for cross-PE alignment
+- ~<pgm>.projrc~ -- global start and end time; its presence is what makes cross-PE time differences meaningful
 - ~<pgm>.<pe>.log~ or ~<pgm>.<pe>.log.gz~ -- one time-ordered event log per PE
 
 #+begin_src bash
@@ -175,10 +176,26 @@ A Charm++ built with ~-DZLIB=1~ writes the logs gzipped. Both forms are read tra
 | ~message.parquet~ | ~message_id~ | Sends linked to their receiving execution |
 | ~idle_interval.parquet~ | ~(pe_id, start_time_us)~ | Paired BEGIN/END_IDLE |
 | ~migration_episode.parquet~ | ~migration_id~ | PE transitions of chare-array elements |
-| ~user_event.parquet~ | -- | Application-emitted trace events |
+| ~user_event.parquet~ | -- | Application-emitted trace events, point and bracketed |
+| ~user_stat.parquet~ | -- | Samples of statistics registered with ~traceRegisterUserStat()~ |
+| ~memory_sample.parquet~ | -- | Heap-usage samples from ~traceMemoryUsage()~ |
 | ~simulation_step.parquet~ | ~(step_id, pe_id)~ | Application timesteps |
 
-All timestamps are in microseconds and aligned to the run's global start, so they are directly comparable across PEs.
+Every table is written on every run, even when empty, so an empty file means "nothing of this kind was traced" rather than "the pipeline did not run". Column names and types are defined in [[file:src/schema.cpp][src/schema.cpp]].
+
+Fields the trace did not observe are NULL rather than a sentinel: an execution whose ~END_PROCESSING~ never appears has NULL end fields, a message whose receiver cannot be identified has NULL receiver fields, and a receive time the runtime recorded as ~-1~ is NULL. Each such case is also counted and reported in the log output.
+
+*** Timestamps and the clock reference
+
+All timestamps are integer microseconds, stored exactly as the logs hold them. When the runtime computes a global start offset, it has already subtracted it from every record before writing the logs, so CharmVZ never subtracts it again; the value is kept as ~processing_element.global_start_us~.
+
+The offset is an origin shift, not a clock synchronization: per-PE clock skew is not recorded anywhere in the trace. Differences between timestamps from two PEs are therefore only computed when a ~.projrc~ with ~RC_GLOBAL_START_TIME~ is present (a zero offset counts). Without one:
+
+- ~message.enqueue_to_exec_us~ and ~message.end_to_end_us~ are NULL, except for messages a PE sent to itself
+- ~migration_episode.parquet~ is empty
+- ~processing_element.global_start_us~ and ~aligned_begin_us~ are NULL
+
+The one non-microsecond time column is ~user_stat.user_time_s~, which holds the application-supplied value from ~updateStatPair()~ in whatever unit the application used.
 
 *** Timesteps
 
@@ -285,17 +302,34 @@ A four-stage pipeline, orchestrated in ~src/main.cpp~. Logs are never read into 
 | Stage | Work |
 |-------+------|
 | 1 | Parse ~.sts~ and ~.projrc~; write the metadata tables; resolve the step-boundary event |
-| 2 | Stream each PE log; emit Execution, IdleInterval, ChareInstance and UserEvent rows |
-| 3+4 | Cross-PE reconstruction: message linkage, migrations, timestep folding, timestamp alignment |
+| 2 | Stream each PE log; write Execution, IdleInterval, ChareInstance, UserEvent, UserStat and MemorySample rows; retain only the keys needed to link records across PEs |
+| 3 | Cross-PE reconstruction: ProcessingElement rows, message linkage, migrations |
+| 4 | Fold per-PE step brackets into SimulationStep rows |
 
-Stage 2 is where the volume is. Arrow column builders flush a row group every 100,000 rows, so memory stays flat regardless of trace size.
+| File | Role |
+|------+------|
+| ~src/main.cpp~ | CLI, trace discovery, stage orchestration |
+| ~src/sts_parser.*~, ~src/rc_parser.*~ | Stage 1 parsers |
+| ~src/metadata_tables.*~ | Stage 1 output tables |
+| ~src/log_parser.*~ | Stage 2 streaming parser |
+| ~src/reconstruction.*~ | Stages 3 and 4 |
+| ~src/builders.*~ | Arrow column builders that flush in row groups |
+| ~src/schema.*~ | The 13 Arrow schemas |
+| ~src/parquet_writer.*~ | Parquet output (ZSTD, schema metadata preserved) |
+| ~src/utils/log_entry.*~ | Record type codes and the parsed record struct |
+
+All pipeline code is built into the ~charmvz_lib~ library; the ~charmvz~ executable is only ~src/main.cpp~ linked against it, which lets the tests drive the pipeline functions directly.
+
+Stage 2 is where the volume is. Arrow column builders flush a row group every 100,000 rows, so memory for row-level output stays flat regardless of trace size. What Stages 3 and 4 need -- one entry per send, per receive and per chare-array execution -- is kept in memory until all logs are read, so that part grows with the number of messages rather than staying constant.
 
 Some details that are easy to get wrong and are handled deliberately:
 
 - A chare array writes exactly ~ndims~ index values, not a fixed four. Reading four consumes an unrelated field as an index for 3-D arrays and under-reads 6-D ones.
 - Migrations are derived from PE transitions between consecutive executions of an element. Pack/unpack events are message serialization, not migration, and ~CkLocMgr::emigrate()~ emits no tracing at all -- so a migration has no directly measurable cost in a trace.
-- Message linkage matches on ~(src_pe, event)~, never on the event serial alone, which is only unique per PE.
-- Bracketed user events carry a ~pe~ field that is always 0, so they are attributed to the PE that owns the log file.
+- Message linkage matches on ~(src_pe, event)~, never on the event serial alone, which is only unique per PE, and additionally requires the receiver to run the entry method the message was created for. Several receivers on one PE are folded into one delivery only when they are resumes of a threaded entry method; any other repetition is written without receiver fields and counted rather than resolved by guessing.
+- A broadcast is one row with no destination; a multicast is one row per listed destination.
+- Bracketed user events carry a ~pe~ field that is always 0, so they are attributed to the PE that owns the log file. Every table takes its PE from the log file name for the same reason.
+- ~MEMORY_USAGE_CURRENT~ writes its byte count before its timestamp, the reverse of every other record, and ~USER_STAT~ writes the application's time as a raw float.
 
 ** Testing
 
@@ -303,7 +337,13 @@ Some details that are easy to get wrong and are handled deliberately:
 meson test -C builddir-rel
 #+end_src
 
-Catch2 suites live in ~tests/~, one file per unit (~test_sts_parser~, ~test_parquet_writer~, ~test_log_parser~). To add one, create ~tests/test_<unit>.cpp~ and append the unit name to the ~foreach~ list in ~meson.build~.
+Catch2 suites live in ~tests/~, one file per unit: ~test_sts_parser~, ~test_parquet_writer~, ~test_log_parser~, ~test_chare_index~, ~test_migration~, ~test_user_stat~ and ~test_reconstruction~. Most write a small synthetic trace with the shared fixture in ~tests/trace_fixture.h~, run the pipeline functions, and read the Parquet output back. To add a suite, create ~tests/test_<unit>.cpp~ and append the unit name to the ~foreach~ list in ~meson.build~.
+
+The Python package has its own suite:
+
+#+begin_src bash
+cd charmvz-viz && pytest
+#+end_src
 
 New tests are expected to be *mutation-checked*: revert the behaviour a test guards and confirm the test fails. A test that still passes against the broken version is not testing what it claims to.
 
