@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 from ..colors import OTHER_COLOR
-from ..derived import compute_entry_spans
+from ..derived import attach_names, execution_rows
 from ..engine import collect
 
 if TYPE_CHECKING:
@@ -49,11 +49,14 @@ def ep_profile(
     tr = time_range or ds.time_range_us
 
     # ── Aggregate total time per EP ──────────────────────────────────────
-    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
     ep_agg = collect(
-        spans.group_by("ep_id", "ep_name")
-        .agg(pl.col("wall_duration_us").sum().alias("total_us"))
-        .sort("total_us", descending=True)
+        attach_names(
+            execution_rows(ds, pes=pes, time_range=tr)
+            .group_by("ep_id")
+            .agg(pl.col("wall_duration_us").sum().alias("total_us")),
+            ds,
+            ep=True,
+        ).sort("total_us", descending=True)
     )
 
     if len(ep_agg) == 0:

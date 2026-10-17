@@ -13,8 +13,7 @@ import numpy as np
 import polars as pl
 
 from ..colors import IDLE_COLOR, OTHER_COLOR
-from ..derived import bin_spans, compute_entry_spans, compute_idle_spans
-from ..engine import collect
+from ..derived import attach_names, bin_loads, compute_idle_spans, execution_rows
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -54,12 +53,12 @@ def time_profile(
     n_pes = ds.num_pes if pes is None else len(list(pes))
 
     # ── Compute per-(bin, ep_id) busy time ───────────────────────────────
-    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
-    binned = bin_spans(spans, bin_width_us, tr)
-
-    ep_bin_agg = collect(
-        binned.group_by("bin_start", "ep_id", "ep_name")
-        .agg(pl.col("bin_contribution_us").sum().alias("total_us"))
+    ep_bin_agg = attach_names(
+        bin_loads(
+            execution_rows(ds, pes=pes, time_range=tr), bin_width_us, tr, ["ep_id"]
+        ).rename({"load_us": "total_us"}),
+        ds,
+        ep=True,
     )
 
     # ── Identify top-N EPs by total time ─────────────────────────────────
@@ -97,16 +96,7 @@ def time_profile(
     idle_row = np.zeros(len(bin_starts))
     if show_idle:
         idles = compute_idle_spans(ds, pes=pes, time_range=tr)
-        idle_binned = bin_spans(
-            idles, bin_width_us, tr,
-            start_col="start_time_us",
-            end_col="end_time_us",
-            duration_col="duration_us",
-        )
-        idle_agg = collect(
-            idle_binned.group_by("bin_start")
-            .agg(pl.col("bin_contribution_us").sum().alias("idle_us"))
-        )
+        idle_agg = bin_loads(idles, bin_width_us, tr, []).rename({"load_us": "idle_us"})
         for row in idle_agg.iter_rows(named=True):
             bin_idx = (row["bin_start"] - t_start) // bin_width_us
             if 0 <= bin_idx < len(bin_starts):

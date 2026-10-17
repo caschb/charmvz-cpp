@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import polars as pl
 
-from ..derived import bin_spans, compute_entry_spans, compute_idle_spans
+from ..derived import bin_loads, clipped_duration, compute_idle_spans, execution_rows
 from ..engine import collect
 
 if TYPE_CHECKING:
@@ -36,34 +36,15 @@ def per_pe_utilization(
         raise ValueError(f"Invalid time range: {tr}")
 
     # Busy time: sum of execution durations clipped to window
-    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
     busy = (
-        spans.with_columns(
-            (
-                pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
-                - pl.max_horizontal(pl.col("start_time_us"), pl.lit(tr[0]))
-            )
-            .clip(lower_bound=0)
-            .alias("clipped_duration"),
-        )
+        execution_rows(ds, pes=pes, time_range=tr)
         .group_by("pe_id")
-        .agg(pl.col("clipped_duration").sum().alias("busy_time_us"))
+        .agg(clipped_duration(tr).sum().alias("busy_time_us"))
     )
 
     # Idle time: sum of idle durations clipped to window
     idles = compute_idle_spans(ds, pes=pes, time_range=tr)
-    idle_agg = (
-        idles.with_columns(
-            (
-                pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
-                - pl.max_horizontal(pl.col("start_time_us"), pl.lit(tr[0]))
-            )
-            .clip(lower_bound=0)
-            .alias("clipped_duration"),
-        )
-        .group_by("pe_id")
-        .agg(pl.col("clipped_duration").sum().alias("idle_time_us"))
-    )
+    idle_agg = idles.group_by("pe_id").agg(clipped_duration(tr).sum().alias("idle_time_us"))
 
     # All PE IDs
     if pes is not None:
@@ -106,16 +87,11 @@ def per_interval_utilization(
         pe_id, bin_start, busy_us, utilization (0–1)
     """
     tr = time_range or ds.time_range_us
-    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
-    binned = bin_spans(spans, bin_width_us, tr)
-
-    result = (
-        binned.group_by("pe_id", "bin_start")
-        .agg(pl.col("bin_contribution_us").sum().alias("busy_us"))
+    loads = bin_loads(execution_rows(ds, pes=pes, time_range=tr), bin_width_us, tr, ["pe_id"])
+    return (
+        loads.rename({"load_us": "busy_us"})
         .with_columns(
             (pl.col("busy_us") / pl.lit(bin_width_us)).clip(upper_bound=1.0).alias("utilization"),
         )
         .sort("pe_id", "bin_start")
     )
-
-    return collect(result)

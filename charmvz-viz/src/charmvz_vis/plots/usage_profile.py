@@ -13,7 +13,7 @@ import numpy as np
 import polars as pl
 
 from ..colors import IDLE_COLOR, OTHER_COLOR
-from ..derived import compute_entry_spans, compute_idle_spans
+from ..derived import attach_names, clipped_duration, compute_idle_spans, execution_rows
 from ..engine import collect
 
 if TYPE_CHECKING:
@@ -51,18 +51,14 @@ def usage_profile(
     tr = time_range or ds.time_range_us
 
     # ── Per-(PE, EP) total duration ──────────────────────────────────────
-    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
     pe_ep_agg = collect(
-        spans.with_columns(
-            (
-                pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
-                - pl.max_horizontal(pl.col("start_time_us"), pl.lit(tr[0]))
-            )
-            .clip(lower_bound=0)
-            .alias("clipped_us")
+        attach_names(
+            execution_rows(ds, pes=pes, time_range=tr)
+            .group_by("pe_id", "ep_id")
+            .agg(clipped_duration(tr).sum().alias("total_us")),
+            ds,
+            ep=True,
         )
-        .group_by("pe_id", "ep_id", "ep_name")
-        .agg(pl.col("clipped_us").sum().alias("total_us"))
     )
 
     # ── Identify top-N EPs globally ──────────────────────────────────────
@@ -98,16 +94,7 @@ def usage_profile(
     if show_idle:
         idles = compute_idle_spans(ds, pes=pes, time_range=tr)
         idle_agg = collect(
-            idles.with_columns(
-                (
-                    pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
-                    - pl.max_horizontal(pl.col("start_time_us"), pl.lit(tr[0]))
-                )
-                .clip(lower_bound=0)
-                .alias("clipped_us")
-            )
-            .group_by("pe_id")
-            .agg(pl.col("clipped_us").sum().alias("idle_us"))
+            idles.group_by("pe_id").agg(clipped_duration(tr).sum().alias("idle_us"))
         )
         for row in idle_agg.iter_rows(named=True):
             if row["pe_id"] in pe_positions:

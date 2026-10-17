@@ -12,7 +12,7 @@ import numpy as np
 import polars as pl
 
 from ..analysis.utilization import per_pe_utilization
-from ..derived import compute_entry_spans
+from ..derived import execution_rows
 from ..engine import collect
 
 if TYPE_CHECKING:
@@ -82,7 +82,7 @@ def extrema_analysis(
         values = ranked[col].to_numpy()
 
     elif attribute == "active_entry_methods":
-        spans = compute_entry_spans(ds, pes=pes, time_range=tr)
+        spans = execution_rows(ds, pes=pes, time_range=tr)
         agg = collect(
             spans.group_by("pe_id")
             .agg(pl.col("ep_id").n_unique().alias("n_eps"))
@@ -93,7 +93,7 @@ def extrema_analysis(
         col = "n_eps"
 
     elif attribute == "avg_grain_size":
-        spans = compute_entry_spans(ds, pes=pes, time_range=tr)
+        spans = execution_rows(ds, pes=pes, time_range=tr)
         agg = collect(
             spans.group_by("pe_id")
             .agg(pl.col("wall_duration_us").mean().alias("avg_dur"))

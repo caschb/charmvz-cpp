@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pytest
 
 from charmvz_vis import TraceDataset
 from charmvz_vis.analysis import load_imbalance_score, per_pe_utilization
 from charmvz_vis.derived import (
+    bin_loads,
     chare_duration_totals,
     chare_frequency_counts,
     cumulative_percent_imbalance_by_time,
@@ -67,6 +69,30 @@ class TestMessageSpans:
     def test_row_count(self, ds: TraceDataset) -> None:
         msgs = ds.message_spans().collect()
         assert len(msgs) == 6
+
+
+class TestBinLoads:
+    def test_splits_spans_across_bins(self) -> None:
+        spans = pl.LazyFrame(
+            {
+                "pe_id": [0, 0, 1, 1, 1],
+                "start_time_us": [50, 120, 300, 450, -30],
+                "end_time_us": [320, 200, 300, None, 40],
+            },
+            schema={"pe_id": pl.Int32, "start_time_us": pl.Int64, "end_time_us": pl.Int64},
+        )
+        loads = bin_loads(spans, 100, (0, 500), ["pe_id"]).sort("pe_id", "bin_start")
+        # 50..320 crosses three boundaries; 120..200 ends on one and stays in
+        # bin 1; the zero-length span at 300 falls in no bin; the open span
+        # runs to the window end; -30..40 is clipped at the window start.
+        assert loads.rows() == [
+            (0, 0, 50),
+            (0, 100, 180),
+            (0, 200, 100),
+            (0, 300, 20),
+            (1, 0, 40),
+            (1, 400, 50),
+        ]
 
 
 class TestPaperDerivedMetrics:
