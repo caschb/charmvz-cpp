@@ -6,6 +6,8 @@
 #include "log_parser.h"
 #include "memory_budget.h"
 #include "spill.h"
+#include "sts_parser.h"
+#include "trace_fixture.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -14,6 +16,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -179,4 +182,63 @@ TEST_CASE("Memory budgets are read with binary suffixes", "[spill][budget]") {
   CHECK_THROWS_AS(parse_size("12X"), std::invalid_argument);
   CHECK_THROWS_AS(parse_size("99999999999999999999"), std::invalid_argument);
   CHECK_THROWS_AS(parse_size("20000000T"), std::invalid_argument);
+}
+
+namespace {
+
+constexpr auto kSts = "PROJECTIONS_ID \n"
+                      "VERSION 11.0\n"
+                      "PROCESSORS 1\n"
+                      "TOTAL_CHARES 1\n"
+                      "CHARE 0 \"Array1D\" 1\n"
+                      "ENTRY CHARE 11 \"one(dummyMsg*)\" 0 0\n"
+                      "TOTAL_EVENTS 0\n"
+                      "TOTAL_STATS 0\n"
+                      "END\n";
+
+auto stage2(const charmvz::test::TempTrace &trace,
+            const charmvz::PipelineOptions &options) {
+  const auto sts = charmvz::parse_sts_file(trace.sts_path());
+  return charmvz::process_logs(trace.log_paths(), sts, charmvz::RcData{},
+                               trace.out_dir(), charmvz::NO_STEP_EVENT,
+                               options);
+}
+
+} // namespace
+
+TEST_CASE("A failed spill write aborts and leaves no spill directory",
+          "[spill][failure]") {
+  charmvz::test::TempTrace trace(kSts);
+  std::string records;
+  for (int i = 0; i < 2000; ++i)
+    records +=
+        "1 0 11 " + std::to_string(i) + " " + std::to_string(i) + " 0 64 0\n";
+  trace.add_log(0, records);
+
+  ScratchRoot root;
+  charmvz::PipelineOptions options;
+  options.spill_root = root.path;
+  options.spill_every_n_records = 100;
+  options.fail_spill_writes_after_bytes = 10000;
+  CHECK_THROWS_AS(stage2(trace, options), std::runtime_error);
+  CHECK(root.entries().empty());
+}
+
+TEST_CASE("An unwritable spill root is refused before any parsing",
+          "[spill][failure]") {
+  if (::geteuid() == 0)
+    SKIP("permission bits do not stop root");
+  charmvz::test::TempTrace trace(kSts);
+  trace.add_log(0, "1 0 11 100 1 0 64 0\n");
+
+  ScratchRoot root;
+  std::filesystem::permissions(root.path,
+                               std::filesystem::perms::owner_read |
+                                   std::filesystem::perms::owner_exec);
+  charmvz::PipelineOptions options;
+  options.spill_root = root.path;
+  options.memory_budget = uint64_t{1} << 30;
+  CHECK_THROWS_AS(stage2(trace, options), std::runtime_error);
+  CHECK_FALSE(std::filesystem::exists(trace.out_dir() + "/execution.parquet"));
+  std::filesystem::permissions(root.path, std::filesystem::perms::owner_all);
 }
