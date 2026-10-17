@@ -111,10 +111,13 @@ bounded", memory grows with the thread count rather than with the trace.
   execution with every time point.
 
 Results are unchanged: ~tools/compare_dumps.py~ finds every table and every
-plotted value identical to the previous implementation on the trace above and
-on an 80-PE, 4.8M-execution trace, apart from the order of PEs that tie in
+plotted value equal to the previous implementation (whole numbers exactly,
+other floats within a relative 1e-9) on the trace above and on an 80-PE,
+4.8M-execution trace, apart from the order of PEs that tie in
 ~extrema_analysis(attribute="active_entry_methods")~, which also changes from
-run to run without these changes.
+run to run without these changes. The paper imbalance with duplicate
+~time_points_us~ no longer multiplies the loads at a repeated point by its
+multiplicity; its percentages are the same.
 
 *** Knobs
 
@@ -131,7 +134,13 @@ the allocator keeps after a query ends.
 *** Not bounded
 
 - The Noise Miner's idle-gap sweep and the paper imbalance with explicit
-  ~time_points_us~ hold one PE's executions at a time (4.8M rows here).
+  ~time_points_us~ hold one PE's executions at a time (4.8M rows here). So
+  does the paper imbalance with the default points when start times are so
+  large that rounding makes neighbouring points coincide.
+- The Noise Miner's exact medians hold one row per distinct (entry method,
+  duration) pair: 19,799 on the trace above, but a trace whose durations are
+  nearly all distinct holds one per execution (a synthetic 20M-execution trace
+  of distinct durations was OOM-killed at 2G).
 - ~bin_loads~ splits boundary-crossing spans in a second pass whose size is
   about total busy time divided by the bin width. Keep ~bin_width_us~ at 1000
   or above on long runs.
@@ -149,7 +158,8 @@ prints its anon and page-cache peaks (from ~tools/memprobe.py~) or the OOM
 kill. Set ~POLARS_TEMP_DIR~ to a directory on disk first; the script refuses
 a tmpfs. ~tools/dump_tables.py~ and ~tools/compare_dumps.py~ dump the data
 behind every table and plot and compare two dumps, for checking that a change
-leaves results alone.
+leaves results alone; the comparison exits non-zero if an item differs or
+exists on one side only.
 
 #+BEGIN_SRC bash
   export POLARS_TEMP_DIR=/scratch/$USER/polars
@@ -162,31 +172,31 @@ were OOM-killed at 2G, and the paper imbalance was killed even at 24G.
 
 | Case | anon peak (MiB) | cgroup peak (MiB) | wall (s) |
 |-
-| ~per_pe_utilization~ | 693 | 706 | 0.7 |
-| ~per_interval_utilization~ | 1002 | 1016 | 1.4 |
-| ~load_imbalance_score~ | 672 | 686 | 0.6 |
-| ~noise_miner~ | 1786 | 1801 | 4.6 |
-| ~noise_occurrences~ | 1712 | 1724 | 4.7 |
-| ~time_profile~ | 1434 | 1449 | 1.6 |
-| ~usage_profile~ | 793 | 808 | 0.9 |
-| ~ep_profile~ | 692 | 704 | 1.0 |
-| ~execution_time_histogram~ | 936 | 952 | 1.9 |
-| ~message_size_histogram~ | 658 | 670 | 2.0 |
-| ~comm_per_pe~ | 522 | 535 | 0.8 |
-| ~extrema_analysis~ | 688 | 702 | 0.7 |
-| ~noise_timeline~ | 1784 | 1797 | 4.8 |
-| ~memory_usage~ | 340 | 350 | 0.0 |
-| ~user_stats_over_time~ | 344 | 354 | 0.1 |
-| ~user_stats_per_pe~ | 342 | 355 | 0.1 |
-| ~chare_duration_comparison~ | 721 | 737 | 1.5 |
-| ~chare_frequency_comparison~ | 661 | 673 | 0.9 |
-| ~chare_activity_heatmap~ | 823 | 838 | 0.8 |
-| ~timeline_overview~ | 1639 | 1655 | 1.7 |
-| ~percent_imbalance~ | 999 | 1013 | 1.4 |
-| ~paper_percent_imbalance~ | 1519 | 1534 | 2.0 |
-| ~timeline_with_imbalance~ | 1604 | 1620 | 3.2 |
-| ~timeline_with_paper_imbalance~ | 1645 | 1658 | 3.8 |
-| ~time_profile~, PE 0, first 10% | 563 | 573 | 0.2 |
+| ~per_pe_utilization~ | 678 | 694 | 0.7 |
+| ~per_interval_utilization~ | 1010 | 1023 | 1.4 |
+| ~load_imbalance_score~ | 689 | 703 | 0.7 |
+| ~noise_miner~ | 1777 | 1790 | 5.4 |
+| ~noise_occurrences~ | 1682 | 1694 | 4.7 |
+| ~time_profile~ | 1410 | 1426 | 1.7 |
+| ~usage_profile~ | 849 | 864 | 0.9 |
+| ~ep_profile~ | 698 | 712 | 1.1 |
+| ~execution_time_histogram~ | 932 | 946 | 1.9 |
+| ~message_size_histogram~ | 665 | 676 | 1.8 |
+| ~comm_per_pe~ | 534 | 547 | 0.7 |
+| ~extrema_analysis~ | 685 | 701 | 0.7 |
+| ~noise_timeline~ | 1782 | 1795 | 4.8 |
+| ~memory_usage~ | 339 | 350 | 0.0 |
+| ~user_stats_over_time~ | 350 | 359 | 0.1 |
+| ~user_stats_per_pe~ | 336 | 349 | 0.1 |
+| ~chare_duration_comparison~ | 705 | 720 | 1.4 |
+| ~chare_frequency_comparison~ | 677 | 688 | 0.9 |
+| ~chare_activity_heatmap~ | 818 | 836 | 0.8 |
+| ~timeline_overview~ | 1555 | 1570 | 1.6 |
+| ~percent_imbalance~ | 1017 | 1031 | 1.3 |
+| ~paper_percent_imbalance~ | 1453 | 1465 | 2.1 |
+| ~timeline_with_imbalance~ | 1580 | 1597 | 2.9 |
+| ~timeline_with_paper_imbalance~ | 1620 | 1635 | 3.4 |
+| ~time_profile~, PE 0, first 10% | 557 | 567 | 0.2 |
 
 The baseline of about 340 MiB is the interpreter with polars, numpy and
 matplotlib loaded.

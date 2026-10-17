@@ -134,6 +134,24 @@ class TestDurationHistogram:
         np.testing.assert_array_equal(edges, expected_edges)
         np.testing.assert_array_equal(counts, expected_counts)
 
+    @pytest.mark.parametrize(
+        ("values", "n_bins"),
+        [
+            # logspace repeats edges over a range this narrow, which the
+            # log-space estimate cannot place.
+            ([1e11, 1e11 + 1e-3], 50),
+            # One edge, so no bins at all.
+            ([1.0, 5.0, 9.0], 1),
+        ],
+    )
+    def test_degenerate_log_edges_match_numpy(self, values: list[float], n_bins: int) -> None:
+        bins = np.logspace(np.log10(min(values)), np.log10(max(values)), n_bins)
+        expected_counts, expected_edges = np.histogram(values, bins=bins)
+
+        edges, counts = _histogram(pl.LazyFrame({"x": values}), n_bins, log_scale=True)
+        np.testing.assert_array_equal(edges, expected_edges)
+        np.testing.assert_array_equal(counts, expected_counts)
+
 
 class TestPaperDerivedMetrics:
     """Tests for derived metrics used by paper-equivalent plots."""
@@ -190,6 +208,19 @@ class TestPaperDerivedMetrics:
         ).collect()
         assert default.height == 4
         assert default.equals(explicit)
+
+    def test_explicit_points_count_pes_missing_from_metadata(self, tiny_trace) -> None:
+        # Explicit points are bucketed one PE at a time; PE 3 has to be found
+        # from its executions to give the same values as the test above.
+        pe_path = tiny_trace / "processing_element.parquet"
+        pl.read_parquet(pe_path).filter(pl.col("pe_id") != 3).write_parquet(pe_path)
+        imbalance = cumulative_percent_imbalance_by_time(
+            TraceDataset(tiny_trace),
+            time_points_us=[250_000, 1_000_000, 2_000_000],
+        ).collect()
+        assert imbalance["percent_imbalance"].to_list() == pytest.approx(
+            [20.0, 10.0, 21.2121212]
+        )
 
 
 class TestUtilization:

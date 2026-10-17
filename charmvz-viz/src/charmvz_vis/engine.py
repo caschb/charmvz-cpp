@@ -15,6 +15,7 @@ caller's lever; :func:`bounded_scan` is the package's.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -28,23 +29,36 @@ _PREFETCH_VAR = "POLARS_ROW_GROUP_PREFETCH_SIZE"
 _PREFETCH_ROW_GROUPS = "2"
 
 
+_lock = threading.Lock()
+# Open blocks that rely on the variable this module set. The last one to close
+# removes it, so overlapping blocks on different threads cannot pull the
+# limit from under each other.
+_holders = 0
+
+
 @contextmanager
 def bounded_scan() -> Iterator[None]:
     """Limit Parquet row-group prefetch for the duration of the block.
 
     A value the caller already put in the environment wins and is left
-    untouched. Otherwise the variable is set and removed again on exit. This
-    mutates ``os.environ``, which is process-global: a query started on
-    another thread while the block is open sees the same limit.
+    untouched. Otherwise the variable is set and removed again when the last
+    open block exits. This mutates ``os.environ``, which is process-global: a
+    query started on another thread while a block is open sees the same limit.
     """
-    if _PREFETCH_VAR in os.environ:
-        yield
-        return
-    os.environ[_PREFETCH_VAR] = _PREFETCH_ROW_GROUPS
+    global _holders
+    with _lock:
+        held = _holders > 0 or _PREFETCH_VAR not in os.environ
+        if held:
+            _holders += 1
+            os.environ[_PREFETCH_VAR] = _PREFETCH_ROW_GROUPS
     try:
         yield
     finally:
-        os.environ.pop(_PREFETCH_VAR, None)
+        if held:
+            with _lock:
+                _holders -= 1
+                if _holders == 0:
+                    os.environ.pop(_PREFETCH_VAR, None)
 
 
 def collect(lf: pl.LazyFrame) -> pl.DataFrame:

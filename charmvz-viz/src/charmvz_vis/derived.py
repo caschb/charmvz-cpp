@@ -89,6 +89,19 @@ def execution_rows(
     return lf if columns is None else lf.select(columns)
 
 
+def distinct_pes(*frames: pl.LazyFrame) -> list[int]:
+    """Sorted ``pe_id`` values occurring in any of ``frames``.
+
+    Loops that hold one PE's rows at a time take their PEs from the rows
+    themselves: a PE missing from ``processing_element`` still has its rows
+    counted, as it would by a single query over the whole table.
+    """
+    found: set[int] = set()
+    for frame in frames:
+        found.update(collect(frame.select("pe_id").unique())["pe_id"].to_list())
+    return sorted(found)
+
+
 FrameT = TypeVar("FrameT", pl.DataFrame, pl.LazyFrame)
 
 
@@ -444,14 +457,18 @@ def percent_imbalance_by_bin(
 
 def _buckets_equally_spaced(
     spans: pl.LazyFrame, points: list[float], first: float, step: float, total_nodes: int
-) -> pl.DataFrame:
+) -> pl.DataFrame | None:
     """Load and row count per ``(node, k)``, ``k`` = number of points <= start.
 
     ``points`` are ``first + i * step`` for ``i = 1..len(points)``, so ``k`` is
     estimated arithmetically and corrected by one step against the points
-    themselves; a final check that every start lies in its bucket guards the
-    estimate. A join against a table of ``len(points) + 1`` rows is all the
+    themselves. A join against a table of ``len(points) + 1`` rows is all the
     streaming engine has to hold.
+
+    Returns ``None`` when some start is still outside its bucket after the
+    correction. That happens when rounding makes sampled points coincide (start
+    times so large that the step is a few ULPs), which shifts the indices of
+    the deduplicated points away from the arithmetic estimate.
     """
     n_points = len(points)
     # Row k holds points k - 1 .. k + 2 (1-based, infinite past either end):
@@ -496,36 +513,22 @@ def _buckets_equally_spaced(
         )
     )
     if buckets["_outside"].sum() > 0:
-        raise RuntimeError("time point bucket estimate did not converge")
+        return None
     return buckets.drop("_outside")
 
 
 def _buckets_per_pe(
-    ds: TraceDataset,
-    pes: Sequence[int] | None,
-    time_range: tuple[int, int] | None,
-    points: list[float],
-    total_nodes: int,
+    spans: pl.LazyFrame, points: list[float], total_nodes: int
 ) -> pl.DataFrame:
     """:func:`_buckets_equally_spaced` for arbitrary sorted ``points``.
 
     Bucketing by search is not streaming-safe, so the starts are searched one
     PE at a time; the peak is the busiest PE's executions.
     """
-    pe_ids = (
-        collect(ds.processing_element.select("pe_id"))["pe_id"].to_list()
-        if pes is None
-        else sorted(set(pes))
-    )
     sorted_points = np.asarray(points, dtype=np.float64)
     parts = []
-    for pe in pe_ids:
-        rows = collect(
-            execution_rows(
-                ds, pes=[pe], time_range=time_range,
-                columns=["pe_id", "start_time_us", "wall_duration_us"],
-            ).filter(pl.col("start_time_us").is_not_null())
-        )
+    for pe in distinct_pes(spans):
+        rows = collect(spans.filter(pl.col("pe_id") == pe))
         k = np.searchsorted(
             sorted_points, rows["start_time_us"].to_numpy().astype(np.float64), side="right"
         )
@@ -566,8 +569,9 @@ def cumulative_percent_imbalance_by_time(
     Each execution is counted once, in the bucket between the two points that
     enclose its start, and the per-point loads are cumulative sums over the
     buckets. For the default equally spaced points the buckets are computed in
-    one streaming pass; explicit ``time_points_us`` are bucketed one PE at a
-    time, which holds the busiest PE's executions in memory.
+    one streaming pass; explicit ``time_points_us`` (and default points that
+    rounding made coincide) are bucketed one PE at a time, which holds the
+    busiest PE's executions in memory.
     """
     if total_nodes <= 0:
         raise ValueError("total_nodes must be positive")
@@ -610,12 +614,13 @@ def cumulative_percent_imbalance_by_time(
 
     unique_points = sorted(set(points))
     n_points = len(unique_points)
+    buckets = None
     if time_points_us is None:
         buckets = _buckets_equally_spaced(
             spans, unique_points, float(min_start), step, total_nodes
         )
-    else:
-        buckets = _buckets_per_pe(ds, pes, time_range, unique_points, total_nodes)
+    if buckets is None:
+        buckets = _buckets_per_pe(spans, unique_points, total_nodes)
 
     # Point j (0-based) covers the starts in buckets 0..j; bucket n_points
     # holds starts at or after the last point and never counts.
@@ -693,9 +698,10 @@ def _histogram(
     counts are numpy's exactly. Log bins take their edges from ``np.logspace``
     as the plots always have; numpy then bins by search, which is reproduced
     by estimating the index in log space, correcting it by one step, and
-    checking every value landed inside its bin.
+    checking every value landed inside its bin, else counting by search.
 
-    Returns ``(edges, counts)``, both empty when no value qualifies.
+    Returns ``(edges, counts)``, both empty when no value qualifies. A log
+    histogram with ``n_bins`` below 2 has no bins.
     """
     x = pl.col("x")
     if log_scale:
@@ -707,6 +713,8 @@ def _histogram(
     if log_scale:
         edges = np.logspace(np.log10(lo), np.log10(hi), n_bins)
         n = len(edges) - 1
+        if n < 1:
+            return edges, np.empty(0, dtype=np.int64)
         # Rounding in logspace can put the outer edges inside [min, max], and
         # numpy drops values outside the edges.
         values = values.filter((x >= edges[0]) & (x <= edges[-1]))
@@ -747,10 +755,25 @@ def _histogram(
 
     per_bin = collect(binned.group_by("_k").agg(agg))
     if log_scale and per_bin["_outside"].sum() > 0:
-        raise RuntimeError("log histogram bin estimate did not converge")
+        return edges, _counts_by_search(values, edges)
     counts = np.zeros(n, dtype=np.int64)
     counts[per_bin["_k"].to_numpy()] = per_bin["count"].to_numpy()
     return edges, counts
+
+
+def _counts_by_search(values: pl.LazyFrame, edges: np.ndarray) -> np.ndarray:
+    """np.histogram's counts for explicit ``edges``, by its own definition.
+
+    numpy counts the values below each edge (at or below the last one) and
+    takes differences. Here that is one streaming pass with a sum per edge,
+    exact for any edges but ``len(edges)`` comparisons per value, so it is
+    only the fallback for edges the log-space estimate cannot resolve: a range
+    narrow enough that ``logspace`` repeats edges.
+    """
+    x = pl.col("x")
+    below = [(x < edge).sum().alias(f"_{i}") for i, edge in enumerate(edges[:-1])]
+    below.append((x <= edges[-1]).sum().alias(f"_{len(edges) - 1}"))
+    return np.diff(np.asarray(collect(values.select(below)).row(0), dtype=np.int64))
 
 
 def duration_histogram(

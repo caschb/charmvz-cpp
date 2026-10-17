@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import polars as pl
 
-from ..derived import compute_idle_spans, execution_rows
+from ..derived import compute_idle_spans, distinct_pes, execution_rows
 from ..engine import collect
 
 if TYPE_CHECKING:
@@ -71,7 +71,8 @@ def _exact_medians(counts: pl.DataFrame) -> pl.DataFrame:
     so this is a small table where ``median()`` over the executions is not a
     streaming aggregate and has to hold them all.
     """
-    duration, n = pl.col("wall_duration_us"), pl.col("_n")
+    # len() counts are UInt32, whose running sum wraps past 2**32 executions.
+    duration, n = pl.col("wall_duration_us"), pl.col("_n").cast(pl.Int64)
     before, through = pl.col("_before"), pl.col("_through")
 
     def value_at(position: pl.Expr) -> pl.Expr:
@@ -90,7 +91,9 @@ def _exact_medians(counts: pl.DataFrame) -> pl.DataFrame:
             value_at((total - 1) // 2).alias("_lo"),
             value_at(total // 2).alias("_hi"),
         )
-        .select("ep_id", ((pl.col("_lo") + pl.col("_hi")) / 2).alias("_median_us"))
+        # Halved before adding: the sum of two durations can overflow, the sum
+        # of their halves cannot, and halving a float is exact.
+        .select("ep_id", (pl.col("_lo") / 2 + pl.col("_hi") / 2).alias("_median_us"))
     )
 
 
@@ -153,20 +156,17 @@ def _idle_gap_candidates(
     second has a running maximum past its start, so the order of ties cannot
     change the gaps.
     """
-    if pes is None:
-        pe_ids = collect(ds.processing_element.select("pe_id"))["pe_id"].to_list()
-    else:
-        pe_ids = list(pes)
+    all_execs = execution_rows(
+        ds, pes=pes, time_range=time_range, columns=["pe_id", "start_time_us", "end_time_us"]
+    )
+    all_idles = compute_idle_spans(ds, pes=pes, time_range=time_range).select(
+        "pe_id", "start_time_us", "end_time_us"
+    )
 
     gaps = []
-    for pe in sorted(set(pe_ids)):
-        execs = execution_rows(
-            ds, pes=[pe], time_range=time_range, columns=["start_time_us", "end_time_us"]
-        )
-        idles = compute_idle_spans(ds, pes=[pe], time_range=time_range).select(
-            "start_time_us",
-            "end_time_us",
-        )
+    for pe in distinct_pes(all_execs, all_idles):
+        execs = all_execs.filter(pl.col("pe_id") == pe).drop("pe_id")
+        idles = all_idles.filter(pl.col("pe_id") == pe).drop("pe_id")
         occupied = collect(
             pl.concat([execs, idles], how="vertical").with_columns(
                 # An unterminated span covers only its own start, which keeps a

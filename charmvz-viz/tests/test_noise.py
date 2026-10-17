@@ -111,6 +111,15 @@ class TestUnaccountedGaps:
             STRETCH_PER_PE * STRETCH_PES
         )
 
+    def test_pe_missing_from_metadata_is_still_swept(self, noisy_trace) -> None:
+        # The sweep runs one PE at a time; the PEs come from the rows, so one
+        # without a processing_element row is not skipped.
+        pe_path = noisy_trace / "processing_element.parquet"
+        pl.read_parquet(pe_path).filter(pl.col("pe_id") != 3).write_parquet(pe_path)
+        cluster = _cluster(noise_miner(TraceDataset(noisy_trace)), "idle_gap")
+        assert cluster["occurrences"] == GAP_PES
+        assert cluster["pe_count"] == GAP_PES
+
     def test_contiguous_executions_produce_no_gaps(
         self, noisy_ds: TraceDataset
     ) -> None:

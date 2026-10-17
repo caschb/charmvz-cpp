@@ -55,7 +55,7 @@ def execution_time_histogram(
     )
 
     fig, ax = plt.subplots(figsize=figsize)
-    if len(counts) == 0:
+    if len(edges) == 0:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=14)
         return fig
 
@@ -124,7 +124,7 @@ def message_size_histogram(
     )
 
     fig, ax = plt.subplots(figsize=figsize)
-    if len(counts) == 0:
+    if len(edges) == 0:
         # An empty log histogram may still have messages, all of size 0.
         if log_scale and len(
             message_size_histogram_counts(ds, 1, False, pes=pes, time_range=time_range)[1]

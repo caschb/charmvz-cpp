@@ -5,8 +5,10 @@
   tools/dump_tables.py TRACE_DIR list
 
 Writes one file per item into OUT_DIR: ``ITEM.parquet`` for a table,
-``ITEM.pkl`` for a figure (every line, patch, collection path, image, text and
-legend entry of every axes, which is what a reader of the plot sees). Each item
+``ITEM.pkl`` for a figure (every line, patch, collection path, image and its
+extent, text, legend entry and tick label of every axes, which is what a
+reader of the plot sees). Every function in ``charmvz_vis.__all__`` is
+covered by at least one item. Each item
 runs in its own child process, one after another, so the peak is that of the
 largest item rather than the sum. Failures are reported and skipped.
 
@@ -15,7 +17,8 @@ run with an older checkout's interpreter to produce the reference dump. Compare
 two dumps with tools/compare_dumps.py.
 
 --paper-oracle computes ``paper_table`` with one streaming aggregation per
-time point instead of cumulative_percent_imbalance_by_time: the filter
+time point instead of cumulative_percent_imbalance_by_time (the paper figures
+still use the implementation under test): the filter
 ``start_time_us < point`` per point is the cross join's semantics by
 construction, and fits in memory where the old cross join does not.
 """
@@ -98,6 +101,7 @@ def items(ds: cv.TraceDataset, oracle: bool) -> dict:
         "chare_activity_frequency": lambda: derived.chare_activity_matrix(
             ds, metric="frequency"
         ).pipe(stream),
+        "load_imbalance_score": lambda: pl.DataFrame({"score": [cv.load_imbalance_score(ds)]}),
         "noise_miner": lambda: cv.noise_miner(ds),
         "noise_occurrences": lambda: cv.noise_occurrences(ds),
         "paper_table": (
@@ -126,6 +130,10 @@ def items(ds: cv.TraceDataset, oracle: bool) -> dict:
         "fig_timeline_overview": lambda: cv.timeline_overview(ds, bin_width_us=bin_us),
         "fig_percent_imbalance": lambda: cv.percent_imbalance(ds, bin_us),
         "fig_timeline_with_imbalance": lambda: cv.timeline_with_imbalance(
+            ds, bin_width_us=bin_us
+        ),
+        "fig_paper_percent_imbalance": lambda: cv.paper_percent_imbalance(ds),
+        "fig_timeline_with_paper_imbalance": lambda: cv.timeline_with_paper_imbalance(
             ds, bin_width_us=bin_us
         ),
         "fig_chare_duration_comparison": lambda: cv.chare_duration_comparison({"a": ds}),
@@ -173,7 +181,10 @@ def figure_data(fig) -> list[dict]:
                     [np.asarray(path.vertices, dtype=float) for path in c.get_paths()]
                     for c in ax.collections
                 ],
-                "images": [np.asarray(im.get_array()) for im in ax.images],
+                "images": [
+                    (np.asarray(im.get_array()), np.asarray(im.get_extent(), dtype=float))
+                    for im in ax.images
+                ],
                 "texts": [t.get_text() for t in ax.texts],
                 "legend": [t.get_text() for t in legend.get_texts()] if legend else [],
                 "xticklabels": [t.get_text() for t in ax.get_xticklabels()],
