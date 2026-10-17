@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from ..engine import collect
 from ..filters import apply_filters
 
 if TYPE_CHECKING:
@@ -82,17 +83,15 @@ def comm_per_pe(
         pe_col = "dst_pe"
 
     if metric in ("sent_msgs", "recv_msgs"):
-        agg_df = (
+        agg_df = collect(
             msg_lf.group_by(pe_col)
             .agg(pl.len().alias("value"))
-            .collect()
         )
         y_label = "Message count"
     else:
-        agg_df = (
+        agg_df = collect(
             msg_lf.group_by(pe_col)
             .agg(pl.col("msg_len").sum().alias("value"))
-            .collect()
         )
         y_label = "Bytes"
 

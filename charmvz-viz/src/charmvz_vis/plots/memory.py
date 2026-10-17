@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 from ..colors import _BASE_PALETTE
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -72,7 +73,7 @@ def memory_usage(
         lf = lf.filter(
             (pl.col("time_us") >= time_range[0]) & (pl.col("time_us") <= time_range[1])
         )
-    df = lf.sort("pe_id", "time_us").collect()
+    df = collect(lf.sort("pe_id", "time_us"))
 
     fig, ax = plt.subplots(figsize=figsize)
 

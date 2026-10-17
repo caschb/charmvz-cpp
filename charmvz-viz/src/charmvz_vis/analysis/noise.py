@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Sequence
 import polars as pl
 
 from ..derived import compute_entry_spans, compute_idle_spans
+from ..engine import collect
 
 if TYPE_CHECKING:
     from ..dataset import TraceDataset
@@ -346,7 +347,7 @@ def _detect(
     n_pes = len(pes) if pes is not None else ds.num_pes
     total_runtime_us = window_us * max(1, n_pes)
 
-    candidates = (
+    candidates = collect(
         pl.concat(
             [
                 _execution_candidates(ds, pes, tr, bin_width_us),
@@ -355,7 +356,6 @@ def _detect(
             how="vertical",
         )
         .with_columns((pl.col("noise_us") // bin_width_us).alias("bin_idx"))
-        .collect()
     )
 
     if candidates.is_empty():

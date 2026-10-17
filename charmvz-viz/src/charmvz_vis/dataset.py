@@ -16,6 +16,7 @@ import polars as pl
 
 from . import derived
 from .colors import EPColorMap
+from .engine import collect
 
 
 class TraceDataset:
@@ -213,7 +214,7 @@ class TraceDataset:
         """Eagerly load small PE metadata."""
         if self._pe_info is not None:
             return
-        pe_df = self.processing_element.collect()
+        pe_df = collect(self.processing_element)
         num_pes = pe_df["total_pes"][0]
         global_start = pe_df["global_start_us"][0]
         # Time range: smallest begin marker to largest end marker. The stored
@@ -255,7 +256,7 @@ class TraceDataset:
         """Consistent EP → color mapping for this dataset."""
         if self._ep_color_map is None:
             ep_ids = (
-                self.entry_method.select("ep_id").collect()["ep_id"].to_list()
+                collect(self.entry_method.select("ep_id"))["ep_id"].to_list()
             )
             self._ep_color_map = EPColorMap(ep_ids)
         return self._ep_color_map

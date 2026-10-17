@@ -14,6 +14,7 @@ import polars as pl
 
 from ..colors import IDLE_COLOR, OTHER_COLOR
 from ..derived import compute_entry_spans, compute_idle_spans
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -51,7 +52,7 @@ def usage_profile(
 
     # ── Per-(PE, EP) total duration ──────────────────────────────────────
     spans = compute_entry_spans(ds, pes=pes, time_range=tr)
-    pe_ep_agg = (
+    pe_ep_agg = collect(
         spans.with_columns(
             (
                 pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
@@ -62,7 +63,6 @@ def usage_profile(
         )
         .group_by("pe_id", "ep_id", "ep_name")
         .agg(pl.col("clipped_us").sum().alias("total_us"))
-        .collect()
     )
 
     # ── Identify top-N EPs globally ──────────────────────────────────────
@@ -97,7 +97,7 @@ def usage_profile(
     idle_row = np.zeros(n_pes)
     if show_idle:
         idles = compute_idle_spans(ds, pes=pes, time_range=tr)
-        idle_agg = (
+        idle_agg = collect(
             idles.with_columns(
                 (
                     pl.min_horizontal(pl.col("end_time_us").fill_null(tr[1]), pl.lit(tr[1]))
@@ -108,7 +108,6 @@ def usage_profile(
             )
             .group_by("pe_id")
             .agg(pl.col("clipped_us").sum().alias("idle_us"))
-            .collect()
         )
         for row in idle_agg.iter_rows(named=True):
             if row["pe_id"] in pe_positions:

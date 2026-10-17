@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal, Sequence
 
 import polars as pl
 
+from .engine import collect
 from .filters import apply_filters
 
 if TYPE_CHECKING:
@@ -359,10 +360,12 @@ def cumulative_percent_imbalance_by_time(
     )
 
     if time_points_us is None:
-        bounds = spans.select(
-            pl.col("start_time_us").min().alias("min_start_us"),
-            pl.col("start_time_us").max().alias("max_start_us"),
-        ).collect()
+        bounds = collect(
+            spans.select(
+                pl.col("start_time_us").min().alias("min_start_us"),
+                pl.col("start_time_us").max().alias("max_start_us"),
+            )
+        )
         min_start = bounds.item(0, "min_start_us")
         max_start = bounds.item(0, "max_start_us")
         if min_start is None or max_start is None:

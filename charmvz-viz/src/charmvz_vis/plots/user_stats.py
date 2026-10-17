@@ -14,6 +14,7 @@ import numpy as np
 import polars as pl
 
 from ..colors import _BASE_PALETTE
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -66,7 +67,7 @@ def _filtered(
         )
     if stats is not None:
         lf = lf.filter(pl.col("stat_id").is_in(list(stats)))
-    return lf.collect()
+    return collect(lf)
 
 
 def _empty_figure(figsize: tuple[float, float], title: str, ylabel: str) -> Figure:

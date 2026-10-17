@@ -16,6 +16,7 @@ import numpy as np
 import polars as pl
 
 from ..derived import compute_entry_spans
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -57,7 +58,7 @@ def execution_time_histogram(
     if ep_ids is not None:
         spans = spans.filter(pl.col("ep_id").is_in(list(ep_ids)))
 
-    durations = spans.select("wall_duration_us").drop_nulls().collect()["wall_duration_us"]
+    durations = collect(spans.select("wall_duration_us").drop_nulls())["wall_duration_us"]
     durations_ms = durations.to_numpy() / 1000.0  # convert to ms
 
     if len(durations_ms) == 0:
@@ -139,7 +140,7 @@ def message_size_histogram(
     tr = time_range or ds.time_range_us
 
     msgs = ds.message_spans(pes=pes, time_range=tr)
-    sizes = msgs.select("msg_len").drop_nulls().collect()["msg_len"]
+    sizes = collect(msgs.select("msg_len").drop_nulls())["msg_len"]
     sizes_bytes = sizes.to_numpy().astype(float)
 
     if len(sizes_bytes) == 0:

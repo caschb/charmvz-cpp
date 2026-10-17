@@ -14,6 +14,7 @@ import polars as pl
 
 from ..colors import IDLE_COLOR, OTHER_COLOR
 from ..derived import bin_spans, compute_entry_spans, compute_idle_spans
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -56,10 +57,9 @@ def time_profile(
     spans = compute_entry_spans(ds, pes=pes, time_range=tr)
     binned = bin_spans(spans, bin_width_us, tr)
 
-    ep_bin_agg = (
+    ep_bin_agg = collect(
         binned.group_by("bin_start", "ep_id", "ep_name")
         .agg(pl.col("bin_contribution_us").sum().alias("total_us"))
-        .collect()
     )
 
     # ── Identify top-N EPs by total time ─────────────────────────────────
@@ -103,10 +103,9 @@ def time_profile(
             end_col="end_time_us",
             duration_col="duration_us",
         )
-        idle_agg = (
+        idle_agg = collect(
             idle_binned.group_by("bin_start")
             .agg(pl.col("bin_contribution_us").sum().alias("idle_us"))
-            .collect()
         )
         for row in idle_agg.iter_rows(named=True):
             bin_idx = (row["bin_start"] - t_start) // bin_width_us

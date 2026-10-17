@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -42,7 +42,7 @@ interactive = [
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "polars", specifier = ">=1.0" },
+    { name = "polars", specifier = ">=1.39,<2" },
     { name = "pyarrow", specifier = ">=14.0" },
 ]
 

@@ -12,6 +12,7 @@ import polars as pl
 
 from ..colors import OTHER_COLOR
 from ..derived import compute_entry_spans
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -49,11 +50,10 @@ def ep_profile(
 
     # ── Aggregate total time per EP ──────────────────────────────────────
     spans = compute_entry_spans(ds, pes=pes, time_range=tr)
-    ep_agg = (
+    ep_agg = collect(
         spans.group_by("ep_id", "ep_name")
         .agg(pl.col("wall_duration_us").sum().alias("total_us"))
         .sort("total_us", descending=True)
-        .collect()
     )
 
     if len(ep_agg) == 0:

@@ -24,6 +24,7 @@ from ..derived import (
     cumulative_percent_imbalance_by_time,
     percent_imbalance_by_bin,
 )
+from ..engine import collect
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -42,7 +43,7 @@ def _chare_order_from_runs(
 ) -> list[str]:
     totals: dict[str, int] = {}
     for ds in runs.values():
-        df = chare_duration_totals(ds, pes=pes, time_range=time_range).collect()
+        df = collect(chare_duration_totals(ds, pes=pes, time_range=time_range))
         for row in df.iter_rows(named=True):
             totals[row["chare_name"]] = totals.get(row["chare_name"], 0) + row["total_duration_us"]
     return [name for name, _ in sorted(totals.items(), key=lambda item: (-item[1], item[0]))]
@@ -130,7 +131,7 @@ def chare_duration_comparison(
     run_names = list(runs.keys())
     values = np.zeros((len(chare_order), len(run_names)))
     for run_idx, ds in enumerate(runs.values()):
-        df = chare_duration_totals(ds, pes=pes, time_range=time_range).collect()
+        df = collect(chare_duration_totals(ds, pes=pes, time_range=time_range))
         totals = dict(zip(df["chare_name"].to_list(), df["total_duration_us"].to_list()))
         for chare_idx, chare_name in enumerate(chare_order):
             values[chare_idx, run_idx] = totals.get(chare_name, 0) / 1e6
@@ -168,7 +169,7 @@ def chare_frequency_comparison(
     run_names = list(runs.keys())
     values = np.zeros((len(chare_order), len(run_names)))
     for run_idx, ds in enumerate(runs.values()):
-        df = chare_frequency_counts(ds, pes=pes, time_range=time_range).collect()
+        df = collect(chare_frequency_counts(ds, pes=pes, time_range=time_range))
         counts = dict(zip(df["chare_name"].to_list(), df["execution_count"].to_list()))
         for chare_idx, chare_name in enumerate(chare_order):
             values[chare_idx, run_idx] = counts.get(chare_name, 0)
@@ -199,7 +200,7 @@ def chare_activity_heatmap(
     figsize: tuple[float, float] | None = None,
 ) -> Figure:
     """Show per-PE chare activity as a heatmap."""
-    df = chare_activity_matrix(ds, pes=pes, time_range=time_range, metric=metric).collect()
+    df = collect(chare_activity_matrix(ds, pes=pes, time_range=time_range, metric=metric))
     if len(df) == 0:
         fig, ax = plt.subplots(figsize=figsize or (8, 5))
         ax.text(0.5, 0.5, "No data", ha="center", va="center")
@@ -252,9 +253,9 @@ def _draw_timeline_overview(
     top_n_chares: int | None = None,
     show_legend: bool = True,
 ) -> None:
-    df = chare_load_by_bin(ds, bin_width_us, pes=pes, time_range=time_range).collect()
+    df = collect(chare_load_by_bin(ds, bin_width_us, pes=pes, time_range=time_range))
     pe_ids = (
-        sorted(ds.processing_element.select("pe_id").collect()["pe_id"].to_list())
+        sorted(collect(ds.processing_element.select("pe_id"))["pe_id"].to_list())
         if pes is None
         else sorted(pes)
     )
@@ -342,7 +343,7 @@ def percent_imbalance(
 ) -> Figure:
     """Plot percent load imbalance over time."""
     tr = time_range or ds.time_range_us
-    df = percent_imbalance_by_bin(ds, bin_width_us, pes=pes, time_range=tr).collect()
+    df = collect(percent_imbalance_by_bin(ds, bin_width_us, pes=pes, time_range=tr))
     fig, ax = plt.subplots(figsize=figsize)
     x = (df["bin_start"].to_numpy() - tr[0]) / 1e6
     ax.plot(x, df["percent_imbalance"].to_numpy(), color="#4e79a7", linewidth=1.8)
@@ -367,14 +368,16 @@ def paper_percent_imbalance(
 ) -> Figure:
     """Plot cumulative percent imbalance using the original paper semantics."""
     tr = time_range or ds.time_range_us
-    df = cumulative_percent_imbalance_by_time(
-        ds,
-        total_time_points=total_time_points,
-        time_points_us=time_points_us,
-        total_nodes=total_nodes,
-        pes=pes,
-        time_range=time_range,
-    ).collect()
+    df = collect(
+        cumulative_percent_imbalance_by_time(
+            ds,
+            total_time_points=total_time_points,
+            time_points_us=time_points_us,
+            total_nodes=total_nodes,
+            pes=pes,
+            time_range=time_range,
+        )
+    )
 
     fig, ax = plt.subplots(figsize=figsize)
     x = (df["time_point_us"].to_numpy() - tr[0]) / 1e6
@@ -419,7 +422,7 @@ def timeline_with_imbalance(
         show_legend=show_legend,
     )
 
-    df = percent_imbalance_by_bin(ds, bin_width_us, pes=pes, time_range=tr).collect()
+    df = collect(percent_imbalance_by_bin(ds, bin_width_us, pes=pes, time_range=tr))
     x = (df["bin_start"].to_numpy() - tr[0]) / 1e6
     imbalance_ax.plot(x, df["percent_imbalance"].to_numpy(), color="#4e79a7", linewidth=1.8)
     imbalance_ax.set_xlabel("Time (s)")
@@ -459,14 +462,16 @@ def timeline_with_paper_imbalance(
         show_legend=show_legend,
     )
 
-    df = cumulative_percent_imbalance_by_time(
-        ds,
-        total_time_points=total_time_points,
-        time_points_us=time_points_us,
-        total_nodes=total_nodes,
-        pes=pes,
-        time_range=time_range,
-    ).collect()
+    df = collect(
+        cumulative_percent_imbalance_by_time(
+            ds,
+            total_time_points=total_time_points,
+            time_points_us=time_points_us,
+            total_nodes=total_nodes,
+            pes=pes,
+            time_range=time_range,
+        )
+    )
     x = (df["time_point_us"].to_numpy() - tr[0]) / 1e6
     imbalance_ax = timeline_ax.twinx()
     imbalance_ax.plot(x, df["percent_imbalance"].to_numpy(), color="purple", linewidth=1.8)

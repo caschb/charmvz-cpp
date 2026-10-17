@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Sequence
 import polars as pl
 
 from ..derived import bin_spans, compute_entry_spans, compute_idle_spans
+from ..engine import collect
 
 if TYPE_CHECKING:
     from ..dataset import TraceDataset
@@ -88,7 +89,7 @@ def per_pe_utilization(
         .sort("pe_id")
     )
 
-    return result.collect()
+    return collect(result)
 
 
 def per_interval_utilization(
@@ -117,4 +118,4 @@ def per_interval_utilization(
         .sort("pe_id", "bin_start")
     )
 
-    return result.collect()
+    return collect(result)
