@@ -83,6 +83,114 @@ feed it: executions running longer than the median for their own entry method,
 and wall-clock time covered by neither an execution nor an idle interval.
 ~noise_occurrences()~ returns the individual events behind a cluster.
 
+** Memory
+
+Every function in ~charmvz_vis.__all__~ runs within a 2 GiB cgroup limit on a
+20-PE ChaNGa trace with 88.5M executions and 55.9M messages (3.7 GB of
+Parquet), with the default 32 threads. Apart from the cases listed under "Not
+bounded", memory grows with the thread count rather than with the trace.
+
+*** How
+
+- Every query runs on polars' streaming engine (~charmvz_vis.engine.collect~),
+  whatever ~POLARS_ENGINE_AFFINITY~ or ~pl.Config~ say. The in-memory engine
+  materialises the whole filtered scan before aggregating.
+- Aggregations group executions by integer keys (~ep_id~, ~pe_id~, bin
+  index) and join entry-method and chare names onto the small result. A name
+  string carried through a scan of every execution is enough to push a
+  streaming aggregation past 2 GiB.
+- Binned loads are summed in two sequential passes, one for the spans inside a
+  single bin and one for the few that cross a bin boundary, rather than one
+  union of two concurrent scans.
+- Histograms count bins in polars, reproducing ~np.histogram~'s bin edges and
+  index arithmetic; the durations never reach numpy.
+- The Noise Miner takes each entry method's median from per-duration counts
+  and merges executions with idle intervals one PE at a time.
+- The paper imbalance counts each execution once, in the bucket between the
+  two sampled time points around its start, instead of cross-joining every
+  execution with every time point.
+
+Results are unchanged: ~tools/compare_dumps.py~ finds every table and every
+plotted value identical to the previous implementation on the trace above and
+on an 80-PE, 4.8M-execution trace, apart from the order of PEs that tie in
+~extrema_analysis(attribute="active_entry_methods")~, which also changes from
+run to run without these changes.
+
+*** Knobs
+
+The streaming engine's working set is roughly ~threads x prefetched row
+groups x projected row-group bytes~, plus the aggregate being built, plus what
+the allocator keeps after a query ends.
+
+| Variable | Effect |
+|----------+--------|
+| ~POLARS_MAX_THREADS~ | Thread pool size, fixed when polars is imported. The main lever on machines with many cores: a two-column aggregation over 88.5M rows peaked at 941 MiB with 32 threads, 475 with 8, 267 with 2 |
+| ~POLARS_ROW_GROUP_PREFETCH_SIZE~ | Row groups read ahead per scan. ~charmvz_vis~ sets it to 2 for the duration of each query unless it is already set (941 to 633 MiB in the same aggregation); 1 is no better. This changes ~os.environ~ for the whole process while a query runs |
+| ~_RJEM_MALLOC_CONF~ | jemalloc settings for polars; only read when polars is imported. ~dirty_decay_ms:0,muzzy_decay_ms:0~ returns freed pages at once instead of keeping them for the next query: ~noise_miner~ peaked at 760 MiB instead of 1909, about 30% slower. Not set by the package |
+
+*** Not bounded
+
+- The Noise Miner's idle-gap sweep and the paper imbalance with explicit
+  ~time_points_us~ hold one PE's executions at a time (4.8M rows here).
+- ~bin_loads~ splits boundary-crossing spans in a second pass whose size is
+  about total busy time divided by the bin width. Keep ~bin_width_us~ at 1000
+  or above on long runs.
+- ~noise_occurrences()~ returns every occurrence of every reported cluster.
+- ~memory_usage()~ and ~user_stats_*()~ load their whole (application-sampled)
+  table.
+- Per-PE plots and ~per_interval_utilization()~ grow with the number of PEs
+  (and bins) by design.
+
+*** Checking it
+
+~tools/constrained_viz.sh LIMIT TRACE_DIR [FUNCTION...]~ runs each entry
+point alone under a cgroup memory limit with swap off, one after another, and
+prints its anon and page-cache peaks (from ~tools/memprobe.py~) or the OOM
+kill. Set ~POLARS_TEMP_DIR~ to a directory on disk first; the script refuses
+a tmpfs. ~tools/dump_tables.py~ and ~tools/compare_dumps.py~ dump the data
+behind every table and plot and compare two dumps, for checking that a change
+leaves results alone.
+
+#+BEGIN_SRC bash
+  export POLARS_TEMP_DIR=/scratch/$USER/polars
+  tools/constrained_viz.sh 2G /path/to/trace
+#+END_SRC
+
+Result at 2G on the 88.5M-execution ChaNGa trace (32 threads, polars 1.39.3);
+every case had ~oom_kills=0~. Before these changes 19 of the first 20 cases
+were OOM-killed at 2G, and the paper imbalance was killed even at 24G.
+
+| Case | anon peak (MiB) | cgroup peak (MiB) | wall (s) |
+|-
+| ~per_pe_utilization~ | 693 | 706 | 0.7 |
+| ~per_interval_utilization~ | 1002 | 1016 | 1.4 |
+| ~load_imbalance_score~ | 672 | 686 | 0.6 |
+| ~noise_miner~ | 1786 | 1801 | 4.6 |
+| ~noise_occurrences~ | 1712 | 1724 | 4.7 |
+| ~time_profile~ | 1434 | 1449 | 1.6 |
+| ~usage_profile~ | 793 | 808 | 0.9 |
+| ~ep_profile~ | 692 | 704 | 1.0 |
+| ~execution_time_histogram~ | 936 | 952 | 1.9 |
+| ~message_size_histogram~ | 658 | 670 | 2.0 |
+| ~comm_per_pe~ | 522 | 535 | 0.8 |
+| ~extrema_analysis~ | 688 | 702 | 0.7 |
+| ~noise_timeline~ | 1784 | 1797 | 4.8 |
+| ~memory_usage~ | 340 | 350 | 0.0 |
+| ~user_stats_over_time~ | 344 | 354 | 0.1 |
+| ~user_stats_per_pe~ | 342 | 355 | 0.1 |
+| ~chare_duration_comparison~ | 721 | 737 | 1.5 |
+| ~chare_frequency_comparison~ | 661 | 673 | 0.9 |
+| ~chare_activity_heatmap~ | 823 | 838 | 0.8 |
+| ~timeline_overview~ | 1639 | 1655 | 1.7 |
+| ~percent_imbalance~ | 999 | 1013 | 1.4 |
+| ~paper_percent_imbalance~ | 1519 | 1534 | 2.0 |
+| ~timeline_with_imbalance~ | 1604 | 1620 | 3.2 |
+| ~timeline_with_paper_imbalance~ | 1645 | 1658 | 3.8 |
+| ~time_profile~, PE 0, first 10% | 563 | 573 | 0.2 |
+
+The baseline of about 340 MiB is the interpreter with polars, numpy and
+matplotlib loaded.
+
 ** Running Tests
 
 #+BEGIN_SRC bash
