@@ -526,12 +526,34 @@ TEST_CASE("Linkage does not depend on the order the logs are read",
        std::filesystem::directory_iterator(ordered.out_dir())) {
     INFO(file.path().filename().string());
     ParquetTable a(file.path().string());
-    ParquetTable b(shuffled.out_dir() + "/" +
-                   file.path().filename().string());
+    ParquetTable b(shuffled.out_dir() + "/" + file.path().filename().string());
     CHECK(a.equals(b));
     ++tables;
   }
   CHECK(tables == 13);
+}
+
+TEST_CASE("A creation without receivers does not take the next pair's",
+          "[reconstruction][message][regression]") {
+  // Creations and receivers are joined as two streams sorted on (src_pe,
+  // event). Event 5 has no receiver and event 4 has no creation, so a join
+  // that does not compare keys on both sides would hand event 6's receiver to
+  // event 5, or event 4's to whichever creation came next.
+  TempTrace trace(kSts);
+  trace.add_projrc(0, 0);
+  trace.add_log(0, creation(5, 2000, 0, 0) + creation(6, 2500, 0, 0));
+  trace.add_log(1, begin(4, 1500, 0, 7) + end(4, 1550, 0) +
+                       begin(6, 2600, 0, 7) + end(6, 2700, 0));
+  run_all(trace);
+
+  const auto rows = read_messages(trace.out_dir());
+  REQUIRE(rows.size() == 2);
+  CHECK(rows[0].event == 5);
+  CHECK_FALSE(rows[0].dst.has_value());
+  CHECK_FALSE(rows[0].exec.has_value());
+  CHECK(rows[1].event == 6);
+  CHECK(rows[1].dst == 1);
+  CHECK(rows[1].exec == 2600);
 }
 
 TEST_CASE("Repeated receivers on one PE are folded only for thread resumes",

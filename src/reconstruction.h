@@ -4,7 +4,8 @@
 
 namespace charmvz {
 
-void reconstruct_message_and_migration(const LogParserResult &log_data,
+// Consumes the creations, receivers and instance locations `log_data` retains.
+void reconstruct_message_and_migration(LogParserResult &log_data,
                                        const RcData &rc_data,
                                        const std::string &output_dir);
 

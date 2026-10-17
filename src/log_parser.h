@@ -1,7 +1,9 @@
 #pragma once
 #include "rc_parser.h"
+#include "spill.h"
 #include "sts_parser.h"
 #include <functional>
+#include <map>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -29,12 +31,14 @@ struct TupleHash {
   }
 };
 
-// One CREATION / CREATION_BCAST / CREATION_MULTICAST record, kept in log
-// order. `send_to_enqueue_us` is the record's last field: creationDone()
-// (charm/src/ck-perf/trace-projections.C) stores `curTime - log.time`, the
-// source-side interval from the CREATION to the moment the send call returned
-// after _CldEnqueue(). It is a duration on the source PE's clock, not a
-// destination timestamp, and zero is a legitimate value.
+// One CREATION / CREATION_BCAST / CREATION_MULTICAST record. `seq` is its
+// ordinal in Stage 2's read order, which keeps records sharing a (src_pe,
+// event) pair in log order once they are sorted. `send_to_enqueue_us` is the
+// record's last field: creationDone() (charm/src/ck-perf/trace-projections.C)
+// stores `curTime - log.time`, the source-side interval from the CREATION to
+// the moment the send call returned after _CldEnqueue(). It is a duration on
+// the source PE's clock, not a destination timestamp, and zero is a legitimate
+// value.
 struct CreationRecord {
   int32_t src_pe;
   int32_t event;
@@ -45,15 +49,28 @@ struct CreationRecord {
   int64_t send_to_enqueue_us;
   bool is_broadcast;
   int32_t broadcast_fanout;
+  int64_t seq;
   std::vector<int32_t> dst_pes;
 };
 
-// Where one chare-array instance was executing, and when. Stage 3 sorts these
-// per instance and emits a MigrationEpisode wherever `pe_id` changes between
-// consecutive executions. Collected only for collections with STS ndims >= 1:
-// groups and nodegroups have one instance resident on every PE and never
-// migrate, so including them would report every hop between their per-PE
-// instances as a migration.
+inline auto record_heap_bytes(const CreationRecord &record) -> std::size_t {
+  return record.dst_pes.capacity() * sizeof(int32_t);
+}
+
+struct CreationOrder {
+  auto operator()(const CreationRecord &a, const CreationRecord &b) const
+      -> bool {
+    return std::tie(a.src_pe, a.event, a.seq) <
+           std::tie(b.src_pe, b.event, b.seq);
+  }
+};
+
+// Where one chare-array instance was executing, and when. Stage 3 reads these
+// per instance in time order and emits a MigrationEpisode wherever `pe_id`
+// changes between consecutive executions. Collected only for collections with
+// STS ndims >= 1: groups and nodegroups have one instance resident on every PE
+// and never migrate, so including them would report every hop between their
+// per-PE instances as a migration.
 //
 // An execution whose END_PROCESSING is missing is still a location: leaving it
 // out would let the sequence step from the execution before it to the one
@@ -65,6 +82,20 @@ struct InstanceLocationRecord {
   int64_t start_time_us;
   int64_t end_time_us;
   bool has_end_time;
+};
+
+// Executions of one instance in time order. The trailing fields only break
+// ties, so that two executions starting at the same microsecond on different
+// PEs come out in one fixed order (lower PE first) rather than whichever the
+// sort happened to leave first.
+struct LocationOrder {
+  auto operator()(const InstanceLocationRecord &a,
+                  const InstanceLocationRecord &b) const -> bool {
+    return std::tie(a.instance_id, a.start_time_us, a.pe_id, a.has_end_time,
+                    a.end_time_us) < std::tie(b.instance_id, b.start_time_us,
+                                              b.pe_id, b.has_end_time,
+                                              b.end_time_us);
+  }
 };
 
 // One row of processing_element.parquet: exactly one per valid PE log, whether
@@ -89,8 +120,8 @@ struct ChareInstanceRecord {
   int32_t index_5;
 };
 
-// The receiver side of a message: one BEGIN_PROCESSING, retained under the
-// (src_pe, event) pair its `pe` and `event` fields carry. `recv_time_us` is the
+// The receiver side of a message: one BEGIN_PROCESSING, with the (src_pe,
+// event) pair its `pe` and `event` fields carry. `recv_time_us` is the
 // record's irecvtime; the runtime writes -1 when it has no value
 // (`has_recv_time` false), and beginExecuteLocal() otherwise passes a constant
 // 0.0, so the field is retained as written rather than interpreted.
@@ -98,13 +129,36 @@ struct ChareInstanceRecord {
 // delivery (a threaded entry method logs a BEGIN_PROCESSING per resume) from
 // two different observations that happen to share the pair.
 struct BeginProcessingRecord {
+  int32_t src_pe;
+  int32_t event;
   int32_t dst_pe;
   int32_t ep_id;
-  int64_t instance_id;
   int32_t msg_len;
-  int64_t recv_time_us;
   bool has_recv_time;
+  int64_t instance_id;
+  int64_t recv_time_us;
   int64_t exec_start_time_us;
+};
+
+// The pair a receiver is linked to its creation by.
+struct MessageKey {
+  template <class Record>
+  auto operator()(const Record &r) const -> std::pair<int32_t, int32_t> {
+    return {r.src_pe, r.event};
+  }
+};
+
+// Groups receivers under the pair a creation is looked up by. Within a group
+// the order is total over every field, so which of two equally early
+// candidates Stage 3 keeps does not depend on how the records were collected.
+struct ReceiverOrder {
+  auto operator()(const BeginProcessingRecord &a,
+                  const BeginProcessingRecord &b) const -> bool {
+    return std::tie(a.src_pe, a.event, a.dst_pe, a.exec_start_time_us, a.ep_id,
+                    a.instance_id, a.msg_len, a.has_recv_time, a.recv_time_us) <
+           std::tie(b.src_pe, b.event, b.dst_pe, b.exec_start_time_us, b.ep_id,
+                    b.instance_id, b.msg_len, b.has_recv_time, b.recv_time_us);
+  }
 };
 
 // One user-event occurrence, ready to be written to user_event.parquet. Every
@@ -153,15 +207,13 @@ struct MemorySample {
   int64_t bytes;
 };
 
-// One PE's occupancy of one timestep, derived from a matched pair of
-// step-boundary user events. `end_time_us` is absent when the log ends inside
-// the step, which happens if tracing stops mid-run.
-struct StepBoundaryRecord {
-  int32_t step_id;
-  int32_t pe_id;
-  int64_t start_time_us;
-  int64_t end_time_us;
-  bool has_end_time;
+// One PE's occupancy of one timestep: the union of every bracket of the
+// step-boundary event that PE logged for the step. `has_end` is false when the
+// log ends inside the step, which happens if tracing stops mid-run.
+struct StepExtent {
+  int64_t start_us;
+  int64_t end_us;
+  bool has_end;
 };
 
 // Counts of the records Stage 2 could not pair, so a run's completeness is
@@ -185,10 +237,10 @@ struct LogParserResult {
   // of the message that started the thread; it is the only case in which
   // several receivers under one pair are known to be one delivery.
   int32_t thread_ep_id = -1;
-  // In log order; a (src_pe, event) pair that the runtime reuses appears as
-  // many times as it was written, never collapsed.
-  std::vector<CreationRecord> creations;
-  std::vector<InstanceLocationRecord> instance_locations;
+  // A (src_pe, event) pair that the runtime reuses appears as many times as
+  // it was written, never collapsed.
+  ExternalSorter<CreationRecord, CreationOrder> creations;
+  ExternalSorter<InstanceLocationRecord, LocationOrder> instance_locations;
   std::vector<ProcessingElementRecord> pes;
   LogParseDiagnostics diagnostics;
   // Keyed on (collection_id, index_0 .. index_5) -- the chare instance's
@@ -197,18 +249,16 @@ struct LogParserResult {
       std::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>,
       ChareInstanceRecord, TupleHash>
       chare_instances;
-  // Every BEGIN_PROCESSING keyed on its (pe, event) fields. A multimap because
-  // the pair is not unique on the receiving side: a multicast is processed on
-  // each of its destinations, and a threaded entry method logs one
-  // BEGIN_PROCESSING per resume under the serial of the message that started
-  // it.
-  std::unordered_multimap<std::tuple<int32_t, int32_t>, BeginProcessingRecord,
-                          TupleHash>
-      begin_processing_map;
-  // Empty unless a step-boundary user event was configured and found. Small by
-  // construction -- one entry per (timestep, PE) -- so it is accumulated in
-  // memory rather than streamed.
-  std::vector<StepBoundaryRecord> step_boundaries;
+  // Every BEGIN_PROCESSING. The (pe, event) pair is not unique on the
+  // receiving side: a multicast is processed on each of its destinations, and
+  // a threaded entry method logs one BEGIN_PROCESSING per resume under the
+  // serial of the message that started it.
+  ExternalSorter<BeginProcessingRecord, ReceiverOrder> receivers;
+  // Keyed on (step_id, pe_id). Empty unless a step-boundary user event was
+  // configured and found. Repeated brackets are folded as they are read, so
+  // this holds one entry per (timestep, PE) however often the application
+  // reuses the event.
+  std::map<std::pair<int32_t, int32_t>, StepExtent> step_boundaries;
 };
 
 // `step_event_id` selects the registered user event whose brackets delimit a

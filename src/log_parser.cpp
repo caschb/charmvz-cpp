@@ -4,8 +4,8 @@
 #include "schema.h"
 #include "utils/log_entry.h"
 #include "zstr.hpp"
-#include <arrow/builder.h>
 #include <algorithm>
+#include <arrow/builder.h>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -155,6 +155,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       ordered_logs.begin(), ordered_logs.end(),
       [](const auto &a, const auto &b) { return a.first < b.first; });
 
+  int64_t creation_seq = 0;
   for (const auto &ordered_log : ordered_logs) {
     const int32_t current_pe_id = ordered_log.first;
     const std::string &log_path = ordered_log.second;
@@ -204,7 +205,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         loc.start_time_us = static_cast<int64_t>(begin.itime);
         loc.has_end_time = end != nullptr;
         loc.end_time_us = end != nullptr ? static_cast<int64_t>(end->itime) : 0;
-        result.instance_locations.push_back(loc);
+        result.instance_locations.push(loc);
       }
     };
 
@@ -240,13 +241,21 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
       user_event_builder.Append(occurrence);
 
       if (step_event_id != NO_STEP_EVENT && user_event_id == step_event_id) {
-        StepBoundaryRecord step{};
-        step.step_id = nested_id;
-        step.pe_id = current_pe_id;
-        step.start_time_us = start_us;
-        step.end_time_us = end_us;
-        step.has_end_time = has_end;
-        result.step_boundaries.push_back(step);
+        // A PE may bracket the same step more than once if the application
+        // reuses the boundary event within a step. Fold those into one
+        // interval per (step, PE) rather than emitting duplicate primary keys.
+        auto [it, inserted] = result.step_boundaries.try_emplace(
+            std::make_pair(nested_id, current_pe_id),
+            StepExtent{start_us, end_us, has_end});
+        if (!inserted) {
+          it->second.start_us = std::min(it->second.start_us, start_us);
+          if (has_end) {
+            it->second.end_us = it->second.has_end
+                                    ? std::max(it->second.end_us, end_us)
+                                    : end_us;
+            it->second.has_end = true;
+          }
+        }
       }
     };
 
@@ -305,9 +314,10 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         cr.send_to_enqueue_us = static_cast<int64_t>(e.irecvtime);
         cr.is_broadcast = (type == LogType::CREATION_BCAST);
         cr.broadcast_fanout = (type == LogType::CREATION_BCAST) ? e.numpes : 0;
+        cr.seq = creation_seq++;
         if (type == LogType::CREATION_MULTICAST)
           cr.dst_pes = std::move(e.pes);
-        result.creations.push_back(std::move(cr));
+        result.creations.push(std::move(cr));
         break;
       }
       case LogType::BEGIN_PROCESSING: {
@@ -353,6 +363,8 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         }
 
         BeginProcessingRecord bp;
+        bp.src_pe = e.pe;
+        bp.event = e.event;
         bp.dst_pe = current_pe_id;
         bp.ep_id = e.eIdx;
         bp.instance_id = result.chare_instances.at(chare_tup).instance_id;
@@ -361,7 +373,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         bp.recv_time_us =
             bp.has_recv_time ? static_cast<int64_t>(e.irecvtime) : 0;
         bp.exec_start_time_us = static_cast<int64_t>(e.itime);
-        result.begin_processing_map.emplace(std::make_tuple(e.pe, e.event), bp);
+        result.receivers.push(bp);
 
         auto [open_it, inserted] = open_processing_entries.try_emplace(
             std::make_pair(e.pe, e.event), e);

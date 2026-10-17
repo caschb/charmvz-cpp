@@ -22,7 +22,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -47,7 +49,7 @@ void run(const TempTrace &trace) {
   rc.available = true;
   rc.global_start_time_us = 0;
   rc.global_end_time_us = 0;
-  const auto result =
+  auto result =
       charmvz::process_logs(trace.log_paths(), sts, rc, trace.out_dir(), -1);
   charmvz::reconstruct_message_and_migration(result, rc, trace.out_dir());
 }
@@ -127,6 +129,24 @@ TEST_CASE("Executions are ordered by time, not by log file order",
   CHECK(mig.ints("dst_pe")[0] == 0);
   CHECK(mig.ints("last_exec_end_src_us")[0] == 1200);
   CHECK(mig.ints("first_exec_start_dst_us")[0] == 2000);
+
+  // Two executions starting in the same microsecond on different PEs have no
+  // order in time, so the lower PE is taken first. Without a fixed rule the
+  // sequence below would read 0 -> 2 -> 1 or 0 -> 1 -> 2 depending on how the
+  // sort left the tie, changing both the hops and their ordinals.
+  TempTrace tie(kSts);
+  tie.add_log(0, execution(11, 1, "7", 1000, 1200));
+  tie.add_log(2, execution(11, 1, "7", 3000, 3050));
+  tie.add_log(1, execution(11, 1, "7", 3000, 3100));
+  run(tie);
+
+  ParquetTable tied(tie.out_dir() + "/migration_episode.parquet");
+  REQUIRE(tied.rows() == 2);
+  CHECK(tied.ints("src_pe") == std::vector<std::optional<int64_t>>{0, 1});
+  CHECK(tied.ints("dst_pe") == std::vector<std::optional<int64_t>>{1, 2});
+  CHECK(tied.ints("last_exec_end_src_us")[1] == 3100);
+  CHECK(tied.ints("migration_seq") ==
+        std::vector<std::optional<int64_t>>{1, 2});
 }
 
 TEST_CASE("migration_seq counts hops within an instance",

@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <arrow/builder.h>
 #include <map>
+#include <optional>
 #include <spdlog/spdlog.h>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -212,7 +212,12 @@ private:
 // is a set of observations the pair cannot separate; the destination is
 // written with NULL receiver fields and diagnosed rather than resolved by
 // picking one.
-void write_messages(const LogParserResult &log_data, const RcData &rc_data,
+//
+// Creations and receivers arrive as two streams sorted on (src_pe, event) and
+// are merge-joined one key group at a time; receivers under a pair no creation
+// carries are executions whose message was never logged as sent, and are
+// passed over unread.
+void write_messages(LogParserResult &log_data, const RcData &rc_data,
                     const std::string &output_dir) {
   ParquetWriter msg_writer(charmvz::schema::message(),
                            output_dir + "/message.parquet");
@@ -232,103 +237,122 @@ void write_messages(const LogParserResult &log_data, const RcData &rc_data,
     bool ambiguous;
   };
   std::map<int32_t, Candidate> earliest_by_dst;
-  for (const auto &cr : log_data.creations) {
-    if (cr.is_broadcast) {
-      // No destination list exists, so nothing is matched (Rule 7).
-      rows.append_unmatched(cr, nullptr);
-      continue;
-    }
 
-    earliest_by_dst.clear();
-    auto [first, last] = log_data.begin_processing_map.equal_range(
-        std::make_tuple(cr.src_pe, cr.event));
-    for (auto it = first; it != last; ++it) {
-      const auto &bp = it->second;
-      if (bp.ep_id != cr.ep_id)
-        continue;
-      if (bp.dst_pe == cr.src_pe && bp.exec_start_time_us < cr.send_time_us)
-        continue;
-      auto [slot, inserted] =
-          earliest_by_dst.try_emplace(bp.dst_pe, Candidate{&bp, false});
-      if (inserted)
-        continue;
-      const auto &kept = *slot->second.earliest;
-      const bool verified_resume = log_data.thread_ep_id >= 0 &&
-                                   bp.ep_id == log_data.thread_ep_id &&
-                                   kept.instance_id == bp.instance_id;
-      if (verified_resume) {
-        ++repeated_deliveries;
-      } else {
-        slot->second.ambiguous = true;
-      }
-      if (bp.exec_start_time_us < kept.exec_start_time_us)
-        slot->second.earliest = &bp;
-    }
+  auto creation_stream = log_data.creations.finish();
+  auto receiver_stream = log_data.receivers.finish();
+  GroupCursor<CreationRecord, MessageKey> creation_groups(creation_stream);
+  GroupCursor<BeginProcessingRecord, MessageKey> receiver_groups(
+      receiver_stream);
+  std::vector<CreationRecord> creations;
+  std::vector<BeginProcessingRecord> receivers;
+  int64_t creation_count = 0;
 
-    auto emit_to = [&](int32_t dst, const Candidate *candidate) {
-      if (candidate == nullptr) {
-        rows.append_unmatched(cr, &dst);
-        return;
-      }
-      if (candidate->ambiguous) {
-        ++ambiguous_destinations;
-        spdlog::debug("Creation (src_pe {}, event {}) has several receivers "
-                      "on PE {} that are not thread resumes; destination "
-                      "written without receiver fields",
-                      cr.src_pe, cr.event, dst);
-        rows.append_unmatched(cr, &dst);
-        return;
-      }
-      rows.append_matched(cr, *candidate->earliest, clock || dst == cr.src_pe);
-    };
+  while (!creation_groups.done()) {
+    const auto key = creation_groups.key();
+    while (!receiver_groups.done() && receiver_groups.key() < key)
+      receiver_groups.skip();
+    receivers.clear();
+    if (!receiver_groups.done() && receiver_groups.key() == key)
+      receiver_groups.take(receivers);
+    creation_groups.take(creations);
+    creation_count += static_cast<int64_t>(creations.size());
 
-    if (!cr.dst_pes.empty()) {
-      for (const int32_t dst : cr.dst_pes) {
-        auto found = earliest_by_dst.find(dst);
-        if (found == earliest_by_dst.end()) {
-          ++unmatched_multicast_destinations;
-          emit_to(dst, nullptr);
+    for (const auto &cr : creations) {
+      if (cr.is_broadcast) {
+        // No destination list exists, so nothing is matched (Rule 7).
+        rows.append_unmatched(cr, nullptr);
+        continue;
+      }
+
+      earliest_by_dst.clear();
+      for (const auto &bp : receivers) {
+        if (bp.ep_id != cr.ep_id)
+          continue;
+        if (bp.dst_pe == cr.src_pe && bp.exec_start_time_us < cr.send_time_us)
+          continue;
+        auto [slot, inserted] =
+            earliest_by_dst.try_emplace(bp.dst_pe, Candidate{&bp, false});
+        if (inserted)
+          continue;
+        const auto &kept = *slot->second.earliest;
+        const bool verified_resume = log_data.thread_ep_id >= 0 &&
+                                     bp.ep_id == log_data.thread_ep_id &&
+                                     kept.instance_id == bp.instance_id;
+        if (verified_resume) {
+          ++repeated_deliveries;
         } else {
-          emit_to(dst, &found->second);
+          slot->second.ambiguous = true;
         }
+        if (bp.exec_start_time_us < kept.exec_start_time_us)
+          slot->second.earliest = &bp;
       }
-      for (const auto &[dst, candidate] : earliest_by_dst) {
-        if (std::find(cr.dst_pes.begin(), cr.dst_pes.end(), dst) ==
-            cr.dst_pes.end()) {
-          ++receivers_outside_multicast;
-          spdlog::warn("BEGIN_PROCESSING on PE {} carries (src_pe {}, event "
-                       "{}) of a multicast whose destination list omits it; "
-                       "not linked",
-                       dst, cr.src_pe, cr.event);
-        }
-      }
-      continue;
-    }
 
-    if (earliest_by_dst.empty()) {
-      ++unmatched_unicasts;
-      rows.append_unmatched(cr, nullptr);
-      continue;
+      auto emit_to = [&](int32_t dst, const Candidate *candidate) {
+        if (candidate == nullptr) {
+          rows.append_unmatched(cr, &dst);
+          return;
+        }
+        if (candidate->ambiguous) {
+          ++ambiguous_destinations;
+          spdlog::debug("Creation (src_pe {}, event {}) has several receivers "
+                        "on PE {} that are not thread resumes; destination "
+                        "written without receiver fields",
+                        cr.src_pe, cr.event, dst);
+          rows.append_unmatched(cr, &dst);
+          return;
+        }
+        rows.append_matched(cr, *candidate->earliest,
+                            clock || dst == cr.src_pe);
+      };
+
+      if (!cr.dst_pes.empty()) {
+        for (const int32_t dst : cr.dst_pes) {
+          auto found = earliest_by_dst.find(dst);
+          if (found == earliest_by_dst.end()) {
+            ++unmatched_multicast_destinations;
+            emit_to(dst, nullptr);
+          } else {
+            emit_to(dst, &found->second);
+          }
+        }
+        for (const auto &[dst, candidate] : earliest_by_dst) {
+          if (std::find(cr.dst_pes.begin(), cr.dst_pes.end(), dst) ==
+              cr.dst_pes.end()) {
+            ++receivers_outside_multicast;
+            spdlog::warn("BEGIN_PROCESSING on PE {} carries (src_pe {}, event "
+                         "{}) of a multicast whose destination list omits it; "
+                         "not linked",
+                         dst, cr.src_pe, cr.event);
+          }
+        }
+        continue;
+      }
+
+      if (earliest_by_dst.empty()) {
+        ++unmatched_unicasts;
+        rows.append_unmatched(cr, nullptr);
+        continue;
+      }
+      if (earliest_by_dst.size() > 1) {
+        // One CREATION with receivers of its own entry method on several PEs.
+        // The trace cannot say which of them the message reached, so every
+        // receiving PE gets a row and none is silently preferred. (On the
+        // ChaNGa reference trace this never happens once the entry method is
+        // required; without it, 7,478 creations matched stale envelopes on
+        // other PEs.)
+        ++multi_pe_unicasts;
+        spdlog::debug("Creation (src_pe {}, event {}) was processed on {} PEs; "
+                      "one row per receiving PE",
+                      cr.src_pe, cr.event, earliest_by_dst.size());
+      }
+      for (const auto &[dst, candidate] : earliest_by_dst)
+        emit_to(dst, &candidate);
     }
-    if (earliest_by_dst.size() > 1) {
-      // One CREATION with receivers of its own entry method on several PEs.
-      // The trace cannot say which of them the message reached, so every
-      // receiving PE gets a row and none is silently preferred. (On the
-      // ChaNGa reference trace this never happens once the entry method is
-      // required; without it, 7,478 creations matched stale envelopes on
-      // other PEs.)
-      ++multi_pe_unicasts;
-      spdlog::debug("Creation (src_pe {}, event {}) was processed on {} PEs; "
-                    "one row per receiving PE",
-                    cr.src_pe, cr.event, earliest_by_dst.size());
-    }
-    for (const auto &[dst, candidate] : earliest_by_dst)
-      emit_to(dst, &candidate);
   }
   rows.flush();
 
   spdlog::info("Wrote {} message rows from {} creations", rows.rows(),
-               log_data.creations.size());
+               creation_count);
   if (unmatched_unicasts > 0)
     spdlog::info("{} unicast creations have no receiver", unmatched_unicasts);
   if (unmatched_multicast_destinations > 0)
@@ -358,7 +382,7 @@ void write_messages(const LogParserResult &log_data, const RcData &rc_data,
 // Rule 9. A migration is a change of PE between two consecutive executions of
 // the same chare-array instance. Pack/unpack events are not involved -- see
 // the comment on schema::migration_episode().
-void write_migrations(const LogParserResult &log_data, const RcData &rc_data,
+void write_migrations(LogParserResult &log_data, const RcData &rc_data,
                       const std::string &output_dir) {
   ParquetWriter mig_writer(charmvz::schema::migration_episode(),
                            output_dir + "/migration_episode.parquet");
@@ -389,55 +413,50 @@ void write_migrations(const LogParserResult &log_data, const RcData &rc_data,
     mig_writer.WriteBatch(batch);
   };
 
-  // Group executions by instance, then order each instance's executions in
-  // time. The runtime wrote every PE's timestamps in the run's common frame,
-  // so they compare across PEs up to the unrecorded per-PE clock offset.
-  std::unordered_map<int64_t, std::vector<const InstanceLocationRecord *>>
-      by_instance;
-  for (const auto &loc : log_data.instance_locations)
-    by_instance[loc.instance_id].push_back(&loc);
+  // Executions arrive grouped by instance and in time order within it. The
+  // runtime wrote every PE's timestamps in the run's common frame, so they
+  // compare across PEs up to the unrecorded per-PE clock offset.
+  auto locations = log_data.instance_locations.finish();
 
   int64_t migration_id = 0;
   int64_t unbounded_hops = 0;
 
-  for (auto &[instance_id, locations] : by_instance) {
-    std::sort(
-        locations.begin(), locations.end(),
-        [](const InstanceLocationRecord *a, const InstanceLocationRecord *b) {
-          return a->start_time_us < b->start_time_us;
-        });
-
-    int32_t sequence = 0;
-    for (size_t i = 1; i < locations.size(); ++i) {
-      const auto *previous = locations[i - 1];
-      const auto *current = locations[i];
-      if (previous->pe_id == current->pe_id)
-        continue;
-
-      // The hop is counted even when it cannot be written, so a later hop's
-      // ordinal still says how many preceded it.
-      ++sequence;
-      if (!previous->has_end_time) {
-        // The source-side end is a non-null column and the execution never
-        // ended in the log; the transition is observed but has no bounds.
-        ++unbounded_hops;
-        continue;
-      }
-
-      ++migration_id;
-      PARQUET_THROW_NOT_OK(mig_id.Append(migration_id));
-      PARQUET_THROW_NOT_OK(mig_inst.Append(instance_id));
-      PARQUET_THROW_NOT_OK(mig_coll.Append(current->collection_id));
-      PARQUET_THROW_NOT_OK(mig_src.Append(previous->pe_id));
-      PARQUET_THROW_NOT_OK(mig_dst.Append(current->pe_id));
-      PARQUET_THROW_NOT_OK(src_end.Append(previous->end_time_us));
-      PARQUET_THROW_NOT_OK(dst_start.Append(current->start_time_us));
-      PARQUET_THROW_NOT_OK(
-          gap.Append(current->start_time_us - previous->end_time_us));
-      PARQUET_THROW_NOT_OK(mig_seq.Append(sequence));
-      if (mig_id.length() >= builders::ROW_GROUP_SIZE)
-        flush();
+  std::optional<InstanceLocationRecord> previous;
+  int32_t sequence = 0;
+  while (!locations.done()) {
+    const InstanceLocationRecord current = locations.take();
+    if (!previous || previous->instance_id != current.instance_id) {
+      previous = current;
+      sequence = 0;
+      continue;
     }
+    const InstanceLocationRecord before = *std::exchange(previous, current);
+    if (before.pe_id == current.pe_id)
+      continue;
+
+    // The hop is counted even when it cannot be written, so a later hop's
+    // ordinal still says how many preceded it.
+    ++sequence;
+    if (!before.has_end_time) {
+      // The source-side end is a non-null column and the execution never
+      // ended in the log; the transition is observed but has no bounds.
+      ++unbounded_hops;
+      continue;
+    }
+
+    ++migration_id;
+    PARQUET_THROW_NOT_OK(mig_id.Append(migration_id));
+    PARQUET_THROW_NOT_OK(mig_inst.Append(current.instance_id));
+    PARQUET_THROW_NOT_OK(mig_coll.Append(current.collection_id));
+    PARQUET_THROW_NOT_OK(mig_src.Append(before.pe_id));
+    PARQUET_THROW_NOT_OK(mig_dst.Append(current.pe_id));
+    PARQUET_THROW_NOT_OK(src_end.Append(before.end_time_us));
+    PARQUET_THROW_NOT_OK(dst_start.Append(current.start_time_us));
+    PARQUET_THROW_NOT_OK(
+        gap.Append(current.start_time_us - before.end_time_us));
+    PARQUET_THROW_NOT_OK(mig_seq.Append(sequence));
+    if (mig_id.length() >= builders::ROW_GROUP_SIZE)
+      flush();
   }
   flush();
   spdlog::info("Wrote {} migration episodes", migration_id);
@@ -449,7 +468,7 @@ void write_migrations(const LogParserResult &log_data, const RcData &rc_data,
 
 } // namespace
 
-void reconstruct_message_and_migration(const LogParserResult &log_data,
+void reconstruct_message_and_migration(LogParserResult &log_data,
                                        const RcData &rc_data,
                                        const std::string &output_dir) {
   spdlog::info("Starting Stage 3 reconstruction message and migrations");
@@ -469,32 +488,7 @@ void reconstruct_simulation_steps(const LogParserResult &log_data,
     return;
   }
 
-  // A PE may bracket the same step more than once if the application reuses
-  // the boundary event within a step. Fold those into one interval per
-  // (step, PE) rather than emitting duplicate primary keys.
-  struct StepExtent {
-    int64_t start_us;
-    int64_t end_us;
-    bool has_end;
-  };
-  std::map<std::pair<int32_t, int32_t>, StepExtent> per_pe;
-
-  for (const auto &boundary : log_data.step_boundaries) {
-    auto key = std::make_pair(boundary.step_id, boundary.pe_id);
-    auto [it, inserted] = per_pe.try_emplace(
-        key, StepExtent{boundary.start_time_us, boundary.end_time_us,
-                        boundary.has_end_time});
-    if (inserted) {
-      continue;
-    }
-    it->second.start_us = std::min(it->second.start_us, boundary.start_time_us);
-    if (boundary.has_end_time) {
-      it->second.end_us =
-          it->second.has_end ? std::max(it->second.end_us, boundary.end_time_us)
-                             : boundary.end_time_us;
-      it->second.has_end = true;
-    }
-  }
+  const auto &per_pe = log_data.step_boundaries;
 
   // The global extent of a step is the union of its per-PE intervals. It is
   // denormalized into every row so a consumer gets the whole-run view without
