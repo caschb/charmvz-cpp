@@ -942,3 +942,92 @@ TEST_CASE("A receiver group larger than the budget is linked from disk",
     CHECK(row.exec == 10000000 - (10 * (kResumes - 1)));
   }
 }
+
+TEST_CASE("Unmatched records at volume survive spilling and merging",
+          "[reconstruction][spill][stress]") {
+  // PE 0 sends 200,000 messages nobody logs receiving, plus a multicast to
+  // 1,000 PEs whose list is several I/O buffers long. PEs 1 and 2 log
+  // 200,000 executions of one array element, alternating between them, under
+  // pairs no creation carries. Every record goes through runs merged four
+  // at a time.
+  constexpr int kCount = 200000;
+  constexpr int kMulticastEvent = 300000;
+  std::string sender;
+  sender.reserve(kCount * 32);
+  for (int i = 0; i < kCount; ++i)
+    sender += creation(i, 1000 + i, 1, 0);
+  std::string destinations;
+  for (int d = 0; d < 1000; ++d)
+    destinations += s(d) + " ";
+  sender += mcast(kMulticastEvent, 500000, 1, 0, destinations, 1000);
+
+  std::vector<std::string> executions(3);
+  for (int k = 0; k < kCount; ++k) {
+    const int64_t t = 1000000 + (100 * k);
+    executions[1 + (k % 2)] += begin(k, t, 2, 3) + end(k, t + 50, 2);
+  }
+  for (const int pe : {1, 2})
+    executions[pe] += begin(kMulticastEvent, 600000 + pe, 0, 4) +
+                      end(kMulticastEvent, 600100, 0);
+
+  TempTrace trace(kSts);
+  trace.add_projrc(0, 0);
+  trace.add_log(0, sender);
+  trace.add_log(1, executions[1]);
+  trace.add_log(2, executions[2]);
+
+  charmvz::PipelineOptions options;
+  options.spill_every_n_records = 7919;
+  options.merge_fan_in = 4;
+  options.io_buffer_bytes = 4096;
+  const auto result = run_all(trace, options);
+  CHECK(result.spill->diagnostics.locations.merge_passes > 1);
+
+  ParquetTable messages(trace.out_dir() + "/message.parquet");
+  REQUIRE(messages.rows() == kCount + 1000);
+  const auto event = messages.ints("event");
+  const auto dst = messages.ints("dst_pe");
+  const auto exec = messages.ints("exec_start_time_us");
+  int64_t unicast_rows = 0;
+  std::vector<int64_t> multicast_destinations;
+  for (size_t i = 0; i < event.size(); ++i) {
+    if (event[i] != kMulticastEvent) {
+      ++unicast_rows;
+      CHECK_FALSE(dst[i].has_value());
+      continue;
+    }
+    multicast_destinations.push_back(*dst[i]);
+    if (*dst[i] == 1 || *dst[i] == 2) {
+      CHECK(exec[i] == 600000 + *dst[i]);
+    } else {
+      CHECK_FALSE(exec[i].has_value());
+    }
+  }
+  CHECK(unicast_rows == kCount);
+  REQUIRE(multicast_destinations.size() == 1000);
+  for (int d = 0; d < 1000; ++d)
+    CHECK(multicast_destinations[d] == d);
+
+  // Element 4, which took the multicast on both PEs, migrates once too.
+  ParquetTable migrations(trace.out_dir() + "/migration_episode.parquet");
+  REQUIRE(migrations.rows() == kCount);
+  const auto instance = migrations.ints("instance_id");
+  const auto seq = migrations.ints("migration_seq");
+  const auto src = migrations.ints("src_pe");
+  std::map<int64_t, std::vector<size_t>> by_instance;
+  for (size_t i = 0; i < instance.size(); ++i)
+    by_instance[*instance[i]].push_back(i);
+  REQUIRE(by_instance.size() == 2);
+  const auto &hops = by_instance.begin()->second.size() == 1
+                         ? by_instance.rbegin()->second
+                         : by_instance.begin()->second;
+  REQUIRE(hops.size() == kCount - 1);
+  for (size_t h = 0; h < hops.size(); ++h) {
+    const auto row = hops[h];
+    if (seq[row] != static_cast<int64_t>(h + 1) ||
+        src[row] != static_cast<int64_t>(1 + (h % 2))) {
+      FAIL("hop " << h << ": migration_seq " << *seq[row] << ", src_pe "
+                  << *src[row]);
+    }
+  }
+}

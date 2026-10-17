@@ -78,6 +78,9 @@ if catch2_dep.found()
                 include_directories: include_directories('src', 'tests'),
                 dependencies: test_deps,
             ),
+            # The spill stress cases push 200,000-record traces through
+            # sanitized builds; meson's 30 s default is too close.
+            timeout: 180,
         )
     endforeach
 endif
