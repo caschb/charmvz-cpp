@@ -19,6 +19,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -493,17 +494,44 @@ TEST_CASE("Source-local serials do not collide across PEs",
 
 TEST_CASE("Linkage does not depend on the order the logs are read",
           "[reconstruction][message][regression]") {
-  // The receiver's log is listed before the sender's.
-  TempTrace trace(kSts);
-  trace.add_projrc(0, 0);
-  trace.add_log(1, begin(5, 2100, 0, 7) + end(5, 2200, 0));
-  trace.add_log(0, creation(5, 2000, 0, 0));
-  run_all(trace);
+  // Element 8 is first seen on PE 0 and element 7 on PE 1, so surrogate
+  // instance ids, and every table that carries them, follow the read order
+  // unless the logs are put in PE order first. The receiver's log is listed
+  // before the sender's in the shuffled run.
+  const auto pe0 = creation(5, 2000, 0, 0) + begin(6, 1000, 1, 8) +
+                   end(6, 1100, 1) + begin(9, 4000, 1, 7) + end(9, 4100, 1);
+  const auto pe1 = creation(6, 900, 0, 1) + begin(5, 2100, 0, 7) +
+                   end(5, 2200, 0) + begin(7, 2300, 1, 8) + end(7, 2400, 1);
+  TempTrace ordered(kSts);
+  ordered.add_projrc(0, 0);
+  ordered.add_log(0, pe0);
+  ordered.add_log(1, pe1);
+  run_all(ordered);
+  TempTrace shuffled(kSts);
+  shuffled.add_projrc(0, 0);
+  shuffled.add_log(1, pe1);
+  shuffled.add_log(0, pe0);
+  run_all(shuffled);
 
-  const auto rows = read_messages(trace.out_dir());
-  REQUIRE(rows.size() == 1);
-  CHECK(rows[0].dst == 1);
-  CHECK(rows[0].end2end == 100);
+  std::map<int64_t, MessageRow> by_src;
+  for (const auto &r : read_messages(shuffled.out_dir()))
+    by_src.emplace(r.src_pe, r);
+  REQUIRE(by_src.size() == 2);
+  CHECK(by_src.at(0).dst == 1);
+  CHECK(by_src.at(0).end2end == 100);
+  CHECK(by_src.at(1).dst == 0);
+
+  int tables = 0;
+  for (const auto &file :
+       std::filesystem::directory_iterator(ordered.out_dir())) {
+    INFO(file.path().filename().string());
+    ParquetTable a(file.path().string());
+    ParquetTable b(shuffled.out_dir() + "/" +
+                   file.path().filename().string());
+    CHECK(a.equals(b));
+    ++tables;
+  }
+  CHECK(tables == 13);
 }
 
 TEST_CASE("Repeated receivers on one PE are folded only for thread resumes",

@@ -5,6 +5,7 @@
 #include "utils/log_entry.h"
 #include "zstr.hpp"
 #include <arrow/builder.h>
+#include <algorithm>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -129,16 +130,17 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
   // (see RcData), so nothing is subtracted here.
   (void)rc_data;
 
+  // Logs are read in PE order, not in the order the caller lists them (a
+  // directory listing has none). Surrogate ids such as instance_id are
+  // assigned on first sighting and Stage 3 consumes the retained records in
+  // read order, so without this the same trace converts to different tables
+  // depending on the file system.
+  std::vector<std::pair<int32_t, std::string>> ordered_logs;
   for (const auto &log_path : log_file_paths) {
-    spdlog::info("Processing log: {}", log_path);
-
     std::string filename = std::filesystem::path(log_path).filename().string();
     std::smatch match;
-    std::regex log_regex(R"(.*\.(\d+)\.log(\.gz)?$)");
-    int32_t current_pe_id = -1;
-    if (std::regex_match(filename, match, log_regex)) {
-      current_pe_id = std::stoi(match[1]);
-    } else {
+    static const std::regex log_regex(R"(.*\.(\d+)\.log(\.gz)?$)");
+    if (!std::regex_match(filename, match, log_regex)) {
       // Every row this pipeline writes is keyed on the PE that owns the log
       // file, so a file whose name yields no PE cannot be attributed at all.
       // Parsing it anyway would write rows on a PE that does not exist, which
@@ -147,6 +149,16 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
                     filename);
       continue;
     }
+    ordered_logs.emplace_back(std::stoi(match[1]), log_path);
+  }
+  std::stable_sort(
+      ordered_logs.begin(), ordered_logs.end(),
+      [](const auto &a, const auto &b) { return a.first < b.first; });
+
+  for (const auto &ordered_log : ordered_logs) {
+    const int32_t current_pe_id = ordered_log.first;
+    const std::string &log_path = ordered_log.second;
+    spdlog::info("Processing log: {}", log_path);
 
     zstr::ifstream log_stream(log_path);
     std::string line;

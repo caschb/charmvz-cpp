@@ -107,6 +107,11 @@ public:
 
   [[nodiscard]] auto rows() const -> int64_t { return table_->num_rows(); }
 
+  // Value equality, row order included; chunk boundaries do not matter.
+  [[nodiscard]] auto equals(const ParquetTable &other) const -> bool {
+    return table_->Equals(*other.table_);
+  }
+
   [[nodiscard]] auto schema() const -> std::shared_ptr<arrow::Schema> {
     return table_->schema();
   }
