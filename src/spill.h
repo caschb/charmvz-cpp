@@ -79,8 +79,10 @@ struct SpillDiagnostics {
   // the Arrow pool plus the estimates for state that is never spilled.
   uint64_t peak_accounted_bytes = 0;
   uint64_t peak_arrow_bytes = 0;
-  // Records in the largest receiver group Stage 3 held at once.
+  // Records in the largest receiver group Stage 3 linked.
   uint64_t largest_receiver_group = 0;
+  // Receiver groups too large to hold, linked by rereading them from disk.
+  int64_t oversized_receiver_groups = 0;
   // The state that cannot be spilled alone exceeded the budget.
   bool floor_exceeded = false;
 
@@ -420,16 +422,19 @@ public:
     return true;
   }
 
-  // Discards the rest of the current group; returns how many records that
-  // was.
-  auto skip() -> std::size_t {
+  // Hands the rest of the current group to `visit` one record at a time;
+  // returns how many records that was.
+  template <class Visit> auto skip(Visit &&visit) -> std::size_t {
     const Key current = key();
     std::size_t skipped = 0;
     while (!stream_.done() && KeyOf{}(stream_.peek()) == current) {
-      stream_.take();
+      visit(stream_.take());
       ++skipped;
     }
     return skipped;
+  }
+  auto skip() -> std::size_t {
+    return skip([](const T & /*record*/) {});
   }
 
 private:

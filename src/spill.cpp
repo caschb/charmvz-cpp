@@ -136,6 +136,10 @@ void log_spill_summary(const SpillDiagnostics &d) {
                "group {} records",
                d.spill_events, format_size(d.bytes_written()),
                d.largest_receiver_group);
+  if (d.oversized_receiver_groups > 0)
+    spdlog::warn("{} receiver groups exceeded the per-group budget and were "
+                 "linked from disk",
+                 d.oversized_receiver_groups);
 }
 
 auto SpillContext::directory() -> SpillDirectory & {

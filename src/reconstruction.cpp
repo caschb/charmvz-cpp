@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <arrow/builder.h>
 #include <arrow/memory_pool.h>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <spdlog/spdlog.h>
@@ -219,7 +220,10 @@ private:
 // Creations and receivers arrive as two streams sorted on (src_pe, event) and
 // are merge-joined one key group at a time; receivers under a pair no creation
 // carries are executions whose message was never logged as sent, and are
-// passed over unread.
+// passed over unread. A receiver group too large for the memory budget is
+// written to a run of its own and read back once per creation that carries
+// its pair, which bounds memory on any input at the price of rereading that
+// one group.
 void write_messages(LogParserResult &log_data, const RcData &rc_data,
                     const std::string &output_dir) {
   ParquetWriter msg_writer(charmvz::schema::message(),
@@ -235,8 +239,10 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
   int64_t repeated_deliveries = 0;
   int64_t ambiguous_destinations = 0;
 
+  // Holds a copy rather than a pointer: an oversized group is read back one
+  // record at a time, so its records do not outlive the scan.
   struct Candidate {
-    const BeginProcessingRecord *earliest;
+    BeginProcessingRecord earliest;
     bool ambiguous;
   };
   std::map<int32_t, Candidate> earliest_by_dst;
@@ -259,19 +265,56 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
           : std::max<std::size_t>(1, max_group_bytes /
                                          sizeof(BeginProcessingRecord));
 
+  using ReceiverCodec = RunCodec<BeginProcessingRecord>;
+  std::filesystem::path oversized_run;
+  auto for_each_receiver = [&](auto &&visit) {
+    if (oversized_run.empty()) {
+      for (const auto &bp : receivers)
+        visit(bp);
+      return;
+    }
+    RunReader reader(oversized_run, ReceiverCodec::type_id,
+                     log_data.spill->settings().io_buffer_bytes, false);
+    while (reader.remaining() > 0) {
+      BeginProcessingRecord bp{};
+      ReceiverCodec::decode(reader, bp);
+      reader.end_record();
+      visit(bp);
+    }
+  };
+
   while (!creation_groups.done()) {
     const auto key = creation_groups.key();
     while (!receiver_groups.done() && receiver_groups.key() < key)
       receiver_groups.skip();
     receivers.clear();
+    oversized_run.clear();
     if (!receiver_groups.done() && receiver_groups.key() == key &&
         !receiver_groups.take(receivers, max_group_records)) {
-      const std::size_t total = receivers.size() + receiver_groups.skip();
-      spdlog::error("{} BEGIN_PROCESSING records carry (src_pe {}, event "
-                    "{}); holding them for linkage needs more than the {} "
-                    "the memory budget allows for one group",
-                    total, key.first, key.second, format_size(max_group_bytes));
-      throw std::runtime_error("Receiver group exceeds the memory budget");
+      if (!log_data.spill->can_spill()) {
+        spdlog::error("BEGIN_PROCESSING records carrying (src_pe {}, event "
+                      "{}) need more than the {} allowed for one group, and "
+                      "no spill directory is available",
+                      key.first, key.second, format_size(max_group_bytes));
+        throw std::runtime_error("Receiver group exceeds the memory budget");
+      }
+      oversized_run = log_data.spill->directory().next_run_path();
+      RunWriter writer(oversized_run, ReceiverCodec::type_id, *log_data.spill);
+      auto write = [&](const BeginProcessingRecord &bp) {
+        ReceiverCodec::encode(writer, bp);
+        writer.end_record();
+      };
+      std::for_each(receivers.begin(), receivers.end(), write);
+      const std::size_t total = receivers.size() + receiver_groups.skip(write);
+      diagnostics.receivers.bytes_written += writer.finish();
+      std::vector<BeginProcessingRecord>().swap(receivers);
+      ++diagnostics.oversized_receiver_groups;
+      diagnostics.largest_receiver_group =
+          std::max<uint64_t>(diagnostics.largest_receiver_group, total);
+      spdlog::warn("{} BEGIN_PROCESSING records carry (src_pe {}, event {}), "
+                   "more than the {} the memory budget allows for one group; "
+                   "they are reread from disk for each creation of the pair",
+                   total, key.first, key.second, format_size(max_group_bytes));
     }
     diagnostics.largest_receiver_group = std::max<uint64_t>(
         diagnostics.largest_receiver_group, receivers.size());
@@ -286,16 +329,16 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
       }
 
       earliest_by_dst.clear();
-      for (const auto &bp : receivers) {
+      for_each_receiver([&](const BeginProcessingRecord &bp) {
         if (bp.ep_id != cr.ep_id)
-          continue;
+          return;
         if (bp.dst_pe == cr.src_pe && bp.exec_start_time_us < cr.send_time_us)
-          continue;
+          return;
         auto [slot, inserted] =
-            earliest_by_dst.try_emplace(bp.dst_pe, Candidate{&bp, false});
+            earliest_by_dst.try_emplace(bp.dst_pe, Candidate{bp, false});
         if (inserted)
-          continue;
-        const auto &kept = *slot->second.earliest;
+          return;
+        const auto &kept = slot->second.earliest;
         const bool verified_resume = log_data.thread_ep_id >= 0 &&
                                      bp.ep_id == log_data.thread_ep_id &&
                                      kept.instance_id == bp.instance_id;
@@ -305,8 +348,8 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
           slot->second.ambiguous = true;
         }
         if (bp.exec_start_time_us < kept.exec_start_time_us)
-          slot->second.earliest = &bp;
-      }
+          slot->second.earliest = bp;
+      });
 
       auto emit_to = [&](int32_t dst, const Candidate *candidate) {
         if (candidate == nullptr) {
@@ -322,8 +365,7 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
           rows.append_unmatched(cr, &dst);
           return;
         }
-        rows.append_matched(cr, *candidate->earliest,
-                            clock || dst == cr.src_pe);
+        rows.append_matched(cr, candidate->earliest, clock || dst == cr.src_pe);
       };
 
       if (!cr.dst_pes.empty()) {
@@ -369,6 +411,8 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
       for (const auto &[dst, candidate] : earliest_by_dst)
         emit_to(dst, &candidate);
     }
+    if (!oversized_run.empty() && !log_data.spill->directory().keep())
+      std::filesystem::remove(oversized_run);
   }
   rows.flush();
 

@@ -906,3 +906,39 @@ TEST_CASE("Spilling to disk does not change any table",
   }
   CHECK(tables == 13);
 }
+
+TEST_CASE("A receiver group larger than the budget is linked from disk",
+          "[reconstruction][spill][stress]") {
+  // 200,000 resumes of one threaded entry method on one element, all under
+  // the (src_pe, event) of a pair the sender reused for two creations. The
+  // group is far larger than the per-group allowance, so it is linked by
+  // rereading it from disk: once for each creation, and in full, since the
+  // earliest resume -- the one that processed the message -- is the last
+  // record in the log.
+  constexpr int kResumes = 200000;
+  std::string receiver_log;
+  receiver_log.reserve(kResumes * 48);
+  for (int k = 0; k < kResumes; ++k) {
+    const int64_t t = 10000000 - (10 * k);
+    receiver_log +=
+        "2 0 0 " + s(t) + " 5 0 0 0 7 0\n3 0 0 " + s(t + 1) + " 5 0 0 0\n";
+  }
+  TempTrace trace(kSts);
+  trace.add_projrc(0, 0);
+  trace.add_log(0, "1 0 0 1000 5 0 64 0\n1 0 0 2000 5 0 64 0\n");
+  trace.add_log(1, receiver_log);
+
+  charmvz::PipelineOptions options;
+  options.spill_every_n_records = 50000;
+  options.max_group_bytes = 1 << 20;
+  const auto result = run_all(trace, options);
+  CHECK(result.spill->diagnostics.oversized_receiver_groups == 1);
+  CHECK(result.spill->diagnostics.largest_receiver_group == kResumes);
+
+  const auto rows = read_messages(trace.out_dir());
+  REQUIRE(rows.size() == 2);
+  for (const auto &row : rows) {
+    CHECK(row.dst == 1);
+    CHECK(row.exec == 10000000 - (10 * (kResumes - 1)));
+  }
+}
