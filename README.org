@@ -138,6 +138,7 @@ run. The test suite passes under this configuration against Arrow 25.0.0.
 
 #+begin_src bash
 ./builddir-rel/charmvz -l <trace_dir> -o <output_dir> [-s <step_event_name>]
+                       [--memory-budget <size> --spill-dir <dir>]
 #+end_src
 
 | Option | Required | Description |
@@ -145,6 +146,10 @@ run. The test suite passes under this configuration against Arrow 25.0.0.
 | ~-l~, ~--logs~ | yes | Directory holding the ~.sts~, ~.projrc~ and per-PE log files |
 | ~-o~, ~--output~ | yes | Directory for the Parquet output; created if absent |
 | ~-s~, ~--step-event~ | no | Name of the registered user event that delimits a timestep (default ~SimulationStep~) |
+| ~--memory-budget~ | no | Memory to stay within, e.g. ~512M~ or ~4G~; ~0~ (default) means unlimited. See [[*Memory budget and spilling][below]] |
+| ~--spill-dir~ | no | Where spilled data goes (default: the system temp directory, ~$TMPDIR~ or ~/tmp~). Must be on disk |
+| ~--keep-spill~ | no | Keep the spill directory after the run, for debugging |
+| ~--clean-stale-spill~ | no | Delete ~charmvz-spill-*~ directories left in the spill directory by conversions that are no longer running |
 
 The whole trace directory is passed at once, not a single file: CharmVZ discovers the ~.sts~, the ~.projrc~ and every log inside it, and needs all of them to align timestamps across PEs.
 
@@ -197,6 +202,27 @@ endUserBracketEvent(stepUE, step);
 Pass a different name with ~-s~ if you register one. If no matching event is found, CharmVZ logs a note and writes an empty ~simulation_step.parquet~ -- an uninstrumented trace is a normal input, not an error.
 
 The table has one row per ~(step_id, pe_id)~. Attribute an execution to the step whose interval *on its own PE* contains it: PEs cross a boundary microseconds apart, so the denormalized ~global_start_time_us~ / ~global_end_time_us~ columns overlap between adjacent steps and are for display rather than attribution.
+
+*** Memory budget and spilling
+
+Message linkage and migration detection need every send, every receiving execution and every element location of the run at once, so without a budget memory grows with the number of events in the trace (about 1.3 GB for a 6.7-million-execution trace). With ~--memory-budget~, CharmVZ keeps that state within the budget by writing it to disk as sorted runs and merging them back when it is needed:
+
+#+begin_src bash
+./builddir-rel/charmvz -l traces/ -o out/ --memory-budget 1G --spill-dir /scratch/$USER
+#+end_src
+
+- The output is identical, row for row, to an unlimited run. Only the time and the disk traffic change.
+- The spill directory must be on disk. *A RAM-backed ~/tmp~ (tmpfs, common on desktop Linux) defeats the budget*: spilled data written there still occupies memory. Check with ~df -T /tmp~; if the type is ~tmpfs~, pass ~--spill-dir~ pointing at a real file system.
+- Expect to need free disk space on the order of the decompressed log size. A warning is logged when the spill file system looks too small.
+- Some memory is never spilled: the output column buffers (about 150 MB) and one entry per distinct chare element (about 110 bytes each). A budget below the buffers plus 64 MB is refused at startup. If the chare elements alone exceed the budget, a warning reports it and the run continues over budget.
+- The spill directory (~charmvz-spill-<pid>-<n>~) is removed when the run ends, including when it aborts. A killed run leaves it behind; ~--clean-stale-spill~ removes those.
+- The end-of-run log reports runs and bytes spilled, merge passes and peak memory.
+
+To check a budget under an enforced limit, ~tools/constrained_run.sh~ runs a conversion in a cgroup (~systemd-run --user~, swap disabled) and compares its output with an unlimited run:
+
+#+begin_src bash
+tools/constrained_run.sh 1G 512M traces/ out-512M/ /scratch/$USER out-unlimited/
+#+end_src
 
 ** Analysis examples
 
@@ -285,10 +311,10 @@ A four-stage pipeline, orchestrated in ~src/main.cpp~. Logs are never read into 
 | Stage | Work |
 |-------+------|
 | 1 | Parse ~.sts~ and ~.projrc~; write the metadata tables; resolve the step-boundary event |
-| 2 | Stream each PE log; emit Execution, IdleInterval, ChareInstance and UserEvent rows |
+| 2 | Stream each PE log, in PE order; emit Execution, IdleInterval, ChareInstance and UserEvent rows; retain sends, receivers and element locations for Stage 3 |
 | 3+4 | Cross-PE reconstruction: message linkage, migrations, timestep folding, timestamp alignment |
 
-Stage 2 is where the volume is. Arrow column builders flush a row group every 100,000 rows, so memory stays flat regardless of trace size.
+Stage 2 is where the volume is. Arrow column builders flush a row group every 100,000 rows, so the tables Stage 2 writes cost flat memory regardless of trace size. What Stage 3 needs is retained instead, in three external sorters (~src/spill.h~): Stage 3 merge-joins sends with receivers on ~(src_pe, event)~ one key group at a time and scans each element's executions in time order. Under a memory budget the sorters spill sorted runs to disk; without one they sort in memory and the same code runs with no disk I/O.
 
 Some details that are easy to get wrong and are handled deliberately:
 
