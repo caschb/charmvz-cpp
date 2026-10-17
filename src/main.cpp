@@ -1,5 +1,6 @@
 #include "CLI/CLI.hpp"
 #include "log_parser.h"
+#include "memory_budget.h"
 #include "metadata_tables.h"
 #include "parquet_writer.h"
 #include "rc_parser.h"
@@ -7,6 +8,7 @@
 #include "schema.h"
 #include "spdlog/cfg/env.h"
 #include "spdlog/spdlog.h"
+#include "spill.h"
 #include "sts_parser.h"
 #include <exception>
 #include <filesystem>
@@ -22,6 +24,9 @@ auto main(int argc, char **argv) -> int {
   // bracketed event that delimits one timestep. Configurable because the name
   // is the application's choice, not the runtime's.
   std::string step_event_name = "SimulationStep";
+  std::string memory_budget_text = "0";
+  charmvz::PipelineOptions options;
+  bool clean_stale_spill = false;
 
   try {
     CLI::App app{"Parser for Charm++ files to Apache Arrow"};
@@ -34,10 +39,33 @@ auto main(int argc, char **argv) -> int {
                    "Name of the registered bracketed user event that delimits "
                    "a timestep; its nestedID carries the step index")
         ->capture_default_str();
+    app.add_option("--memory-budget", memory_budget_text,
+                   "Memory the conversion should stay within, e.g. 512M or "
+                   "4G; state beyond it is spilled to disk. 0 = unlimited, "
+                   "nothing is written to disk")
+        ->capture_default_str();
+    app.add_option("--spill-dir", options.spill_root,
+                   "Directory under which spill runs are written; defaults "
+                   "to the system temp directory (TMPDIR). Must be on disk: "
+                   "a RAM-backed tmpfs defeats the budget")
+        ->check(CLI::ExistingDirectory);
+    app.add_flag("--keep-spill", options.keep_spill,
+                 "Do not delete the spill directory when the run ends");
+    app.add_flag("--clean-stale-spill", clean_stale_spill,
+                 "Delete spill directories left in the spill root by "
+                 "conversions that are no longer running");
     CLI11_PARSE(app, argc, argv);
+    options.memory_budget = charmvz::parse_size(memory_budget_text);
   } catch (const std::exception &e) {
     spdlog::error("Error: {}", e.what());
     return 1;
+  }
+
+  if (clean_stale_spill) {
+    const auto root = options.spill_root.empty()
+                          ? std::filesystem::temp_directory_path()
+                          : options.spill_root;
+    charmvz::remove_stale_spill_directories(root);
   }
 
   if (!std::filesystem::exists(out_path)) {
@@ -86,6 +114,19 @@ auto main(int argc, char **argv) -> int {
     auto sts_data = charmvz::parse_sts_file(sts_file_path);
     auto rc_data = charmvz::parse_rc_file(rc_file_path);
 
+    if (options.memory_budget > 0) {
+      const uint64_t minimum =
+          charmvz::builder_floor_bytes(sts_data.papi_event_names) +
+          charmvz::kBudgetHeadroomBytes;
+      if (options.memory_budget < minimum) {
+        spdlog::error("--memory-budget {} is below the {} this trace needs "
+                      "for its output buffers alone",
+                      charmvz::format_size(options.memory_budget),
+                      charmvz::format_size(minimum));
+        return 1;
+      }
+    }
+
     charmvz::write_metadata_tables(sts_data, out_path.string());
 
     const int32_t step_event_id =
@@ -100,13 +141,15 @@ auto main(int argc, char **argv) -> int {
     }
 
     // Stage 2
-    auto log_result = charmvz::process_logs(traces_paths, sts_data, rc_data,
-                                            out_path.string(), step_event_id);
+    auto log_result =
+        charmvz::process_logs(traces_paths, sts_data, rc_data,
+                              out_path.string(), step_event_id, options);
 
     // Stage 3 & 4
     charmvz::reconstruct_message_and_migration(log_result, rc_data,
                                                out_path.string());
     charmvz::reconstruct_simulation_steps(log_result, out_path.string());
+    charmvz::log_spill_summary(log_result.spill->diagnostics);
 
     spdlog::info("Pipeline successfully finished.");
   } catch (const std::exception &e) {

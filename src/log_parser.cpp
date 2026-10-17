@@ -1,11 +1,13 @@
 #include "log_parser.h"
 #include "builders.h"
+#include "memory_budget.h"
 #include "parquet_writer.h"
 #include "schema.h"
 #include "utils/log_entry.h"
 #include "zstr.hpp"
 #include <algorithm>
 #include <arrow/builder.h>
+#include <arrow/memory_pool.h>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -89,13 +91,174 @@ void attach_user_event_name(const StsData &sts_data,
   }
 }
 
+auto make_spill_context(const PipelineOptions &options, uint64_t floor_bytes,
+                        const std::vector<std::string> &log_file_paths)
+    -> std::unique_ptr<SpillContext> {
+  constexpr uint64_t kMiB = uint64_t{1} << 20;
+  const uint64_t budget = options.memory_budget;
+  // What the sorters may hold once the builders have their share.
+  const uint64_t share = budget > floor_bytes ? budget - floor_bytes : 0;
+
+  SpillContext::Settings settings;
+  settings.fan_in = options.merge_fan_in;
+  settings.fail_writes_after_bytes = options.fail_spill_writes_after_bytes;
+  // Stage 3 merges creations and receivers at the same time, each with up
+  // to fan_in + 1 open runs; together their buffers stay within half the
+  // share.
+  settings.io_buffer_bytes =
+      options.io_buffer_bytes > 0 ? options.io_buffer_bytes
+      : budget > 0 ? std::clamp<uint64_t>(share / (4 * (settings.fan_in + 1)),
+                                          64 * 1024, 4 * kMiB)
+                   : kMiB;
+  settings.max_group_bytes = options.max_group_bytes > 0
+                                 ? options.max_group_bytes
+                             : budget > 0 ? std::max<uint64_t>(share / 4, kMiB)
+                                          : 0;
+
+  if (budget == 0 && options.spill_every_n_records == 0)
+    return std::make_unique<SpillContext>(nullptr, settings);
+
+  const auto root = options.spill_root.empty()
+                        ? std::filesystem::temp_directory_path()
+                        : options.spill_root;
+  auto directory = std::make_unique<SpillDirectory>(root, options.keep_spill);
+
+  // Every retained record is spilled at most once per merge pass, so the
+  // decompressed size of the logs is a generous estimate of one pass.
+  uint64_t estimate = 0;
+  for (const auto &log_path : log_file_paths) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(log_path, ec);
+    if (!ec)
+      estimate += log_path.ends_with(".gz") ? 5 * size : size;
+  }
+  std::error_code ec;
+  const auto space = std::filesystem::space(root, ec);
+  if (!ec && space.available < estimate) {
+    spdlog::warn("Spill directory {} has {} free; spilling this trace may "
+                 "need up to about {}",
+                 root.string(), format_size(space.available),
+                 format_size(estimate));
+  }
+  spdlog::info("Memory budget {} (builder floor about {}); spilling to {}",
+               budget > 0 ? format_size(budget) : "unlimited",
+               format_size(floor_bytes), directory->path().string());
+  return std::make_unique<SpillContext>(std::move(directory), settings);
+}
+
+// Keeps Stage 2 within the memory budget. Before every push to a sorter it
+// adds up what is resident -- the three sorters' buffers, the Arrow pool, and
+// estimates for the chare instances and the current log's open executions,
+// which are never spilled -- plus what the push itself may allocate, and
+// spills the largest buffer until that fits.
+class MemoryPressure {
+public:
+  MemoryPressure(LogParserResult &result, const PipelineOptions &options,
+                 uint64_t floor_bytes)
+      : result_(result), budget_(options.memory_budget),
+        every_n_(options.spill_every_n_records) {
+    // Below this a buffer is not worth a run of its own: when the state that
+    // cannot be spilled crowds the budget, spilling tiny buffers would only
+    // produce thousands of runs.
+    const uint64_t share =
+        budget_ > floor_bytes ? budget_ - floor_bytes : budget_;
+    min_run_bytes_ =
+        std::clamp<uint64_t>(share / 16, 64 * 1024, uint64_t{16} << 20);
+  }
+
+  template <class Sorter>
+  void before_push(Sorter &sorter, std::size_t open_executions) {
+    if (every_n_ > 0 && sorter.size() >= every_n_)
+      sorter.spill();
+    if (budget_ == 0)
+      return;
+    auto &diagnostics = result_.spill->diagnostics;
+    uint64_t needed = accounted(open_executions) + sorter.growth_bytes();
+    while (needed > budget_) {
+      if (!spill_largest()) {
+        if (!diagnostics.floor_exceeded) {
+          diagnostics.floor_exceeded = true;
+          spdlog::warn(
+              "Memory that cannot be spilled exceeds the budget of {}: "
+              "Arrow buffers {}, {} chare instances, {} open executions; "
+              "continuing over budget",
+              format_size(budget_),
+              format_size(static_cast<uint64_t>(
+                  arrow::default_memory_pool()->bytes_allocated())),
+              result_.chare_instances.size(), open_executions);
+        }
+        break;
+      }
+      needed = accounted(open_executions) + sorter.growth_bytes();
+    }
+    diagnostics.peak_accounted_bytes =
+        std::max(diagnostics.peak_accounted_bytes, needed);
+  }
+
+  // Once anything is on disk, Stage 3 merges from disk; buffers still in
+  // memory would only sit beside the merge's read buffers.
+  void finish() {
+    if (budget_ == 0)
+      return;
+    if (result_.creations.has_runs() || result_.receivers.has_runs() ||
+        result_.instance_locations.has_runs()) {
+      result_.creations.spill();
+      result_.receivers.spill();
+      result_.instance_locations.spill();
+    }
+  }
+
+private:
+  [[nodiscard]] auto accounted(std::size_t open_executions) const -> uint64_t {
+    return result_.creations.footprint() + result_.receivers.footprint() +
+           result_.instance_locations.footprint() +
+           static_cast<uint64_t>(
+               arrow::default_memory_pool()->bytes_allocated()) +
+           (result_.chare_instances.size() * kChareInstanceBytes) +
+           (open_executions * kOpenExecutionBytes);
+  }
+
+  auto spill_largest() -> bool {
+    auto &creations = result_.creations;
+    auto &receivers = result_.receivers;
+    auto &locations = result_.instance_locations;
+    const std::size_t largest = std::max(
+        {creations.footprint(), receivers.footprint(), locations.footprint()});
+    if (largest == 0 || largest < min_run_bytes_)
+      return false;
+    if (largest == receivers.footprint())
+      receivers.spill();
+    else if (largest == creations.footprint())
+      creations.spill();
+    else
+      locations.spill();
+    ++result_.spill->diagnostics.spill_events;
+    spdlog::debug("Spilled a {} buffer", format_size(largest));
+    return true;
+  }
+
+  LogParserResult &result_;
+  uint64_t budget_;
+  uint64_t every_n_;
+  uint64_t min_run_bytes_;
+};
+
 } // namespace
 
 auto process_logs(const std::vector<std::string> &log_file_paths,
                   const StsData &sts_data, const RcData &rc_data,
-                  const std::string &output_dir, int32_t step_event_id)
-    -> LogParserResult {
+                  const std::string &output_dir, int32_t step_event_id,
+                  const PipelineOptions &options) -> LogParserResult {
   LogParserResult result;
+  const uint64_t floor_bytes = builder_floor_bytes(sts_data.papi_event_names);
+  result.spill = make_spill_context(options, floor_bytes, log_file_paths);
+  result.creations.attach(result.spill.get(),
+                          &result.spill->diagnostics.creations);
+  result.receivers.attach(result.spill.get(),
+                          &result.spill->diagnostics.receivers);
+  result.instance_locations.attach(result.spill.get(),
+                                   &result.spill->diagnostics.locations);
+  MemoryPressure pressure(result, options, floor_bytes);
   for (const auto &ep : sts_data.entries) {
     if (ep.name == "dummy_thread_ep") {
       result.thread_ep_id = ep.ep_id;
@@ -205,6 +368,8 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         loc.start_time_us = static_cast<int64_t>(begin.itime);
         loc.has_end_time = end != nullptr;
         loc.end_time_us = end != nullptr ? static_cast<int64_t>(end->itime) : 0;
+        pressure.before_push(result.instance_locations,
+                             open_processing_entries.size());
         result.instance_locations.push(loc);
       }
     };
@@ -317,6 +482,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         cr.seq = creation_seq++;
         if (type == LogType::CREATION_MULTICAST)
           cr.dst_pes = std::move(e.pes);
+        pressure.before_push(result.creations, open_processing_entries.size());
         result.creations.push(std::move(cr));
         break;
       }
@@ -373,6 +539,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
         bp.recv_time_us =
             bp.has_recv_time ? static_cast<int64_t>(e.irecvtime) : 0;
         bp.exec_start_time_us = static_cast<int64_t>(e.itime);
+        pressure.before_push(result.receivers, open_processing_entries.size());
         result.receivers.push(bp);
 
         auto [open_it, inserted] = open_processing_entries.try_emplace(
@@ -708,6 +875,7 @@ auto process_logs(const std::vector<std::string> &log_file_paths,
   user_event_builder.Flush();
   user_stat_builder.Flush();
   memory_sample_builder.Flush();
+  pressure.finish();
 
   return result;
 }

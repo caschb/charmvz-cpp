@@ -1,12 +1,15 @@
 #include "reconstruction.h"
 #include "builders.h"
+#include "memory_budget.h"
 #include "parquet_writer.h"
 #include "schema.h"
 #include <algorithm>
 #include <arrow/builder.h>
+#include <arrow/memory_pool.h>
 #include <map>
 #include <optional>
 #include <spdlog/spdlog.h>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -240,20 +243,38 @@ void write_messages(LogParserResult &log_data, const RcData &rc_data,
 
   auto creation_stream = log_data.creations.finish();
   auto receiver_stream = log_data.receivers.finish();
-  GroupCursor<CreationRecord, MessageKey> creation_groups(creation_stream);
-  GroupCursor<BeginProcessingRecord, MessageKey> receiver_groups(
+  GroupCursor<decltype(creation_stream), MessageKey> creation_groups(
+      creation_stream);
+  GroupCursor<decltype(receiver_stream), MessageKey> receiver_groups(
       receiver_stream);
   std::vector<CreationRecord> creations;
   std::vector<BeginProcessingRecord> receivers;
   int64_t creation_count = 0;
+
+  auto &diagnostics = log_data.spill->diagnostics;
+  const uint64_t max_group_bytes = log_data.spill->settings().max_group_bytes;
+  const std::size_t max_group_records =
+      max_group_bytes == 0
+          ? static_cast<std::size_t>(-1)
+          : std::max<std::size_t>(1, max_group_bytes /
+                                         sizeof(BeginProcessingRecord));
 
   while (!creation_groups.done()) {
     const auto key = creation_groups.key();
     while (!receiver_groups.done() && receiver_groups.key() < key)
       receiver_groups.skip();
     receivers.clear();
-    if (!receiver_groups.done() && receiver_groups.key() == key)
-      receiver_groups.take(receivers);
+    if (!receiver_groups.done() && receiver_groups.key() == key &&
+        !receiver_groups.take(receivers, max_group_records)) {
+      const std::size_t total = receivers.size() + receiver_groups.skip();
+      spdlog::error("{} BEGIN_PROCESSING records carry (src_pe {}, event "
+                    "{}); holding them for linkage needs more than the {} "
+                    "the memory budget allows for one group",
+                    total, key.first, key.second, format_size(max_group_bytes));
+      throw std::runtime_error("Receiver group exceeds the memory budget");
+    }
+    diagnostics.largest_receiver_group = std::max<uint64_t>(
+        diagnostics.largest_receiver_group, receivers.size());
     creation_groups.take(creations);
     creation_count += static_cast<int64_t>(creations.size());
 
@@ -475,6 +496,8 @@ void reconstruct_message_and_migration(LogParserResult &log_data,
   write_processing_elements(log_data, rc_data, output_dir);
   write_messages(log_data, rc_data, output_dir);
   write_migrations(log_data, rc_data, output_dir);
+  log_data.spill->diagnostics.peak_arrow_bytes =
+      static_cast<uint64_t>(arrow::default_memory_pool()->max_memory());
 }
 
 void reconstruct_simulation_steps(const LogParserResult &log_data,

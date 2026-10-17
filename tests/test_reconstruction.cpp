@@ -45,12 +45,15 @@ constexpr auto kSts = "PROJECTIONS_ID \n"
 
 // The whole pipeline, with the clock reference read from the fixture's
 // .projrc (absent unless the test wrote one).
-auto run_all(const TempTrace &trace) -> charmvz::LogParserResult {
+auto run_all(const TempTrace &trace,
+             const charmvz::PipelineOptions &options = {})
+    -> charmvz::LogParserResult {
   const auto sts = charmvz::parse_sts_file(trace.sts_path());
   const auto rc = charmvz::parse_rc_file(trace.rc_path());
   charmvz::write_metadata_tables(sts, trace.out_dir());
-  auto result = charmvz::process_logs(trace.log_paths(), sts, rc,
-                                      trace.out_dir(), charmvz::NO_STEP_EVENT);
+  auto result =
+      charmvz::process_logs(trace.log_paths(), sts, rc, trace.out_dir(),
+                            charmvz::NO_STEP_EVENT, options);
   charmvz::reconstruct_message_and_migration(result, rc, trace.out_dir());
   charmvz::reconstruct_simulation_steps(result, trace.out_dir());
   return result;
@@ -816,4 +819,90 @@ TEST_CASE("A full run writes all thirteen tables with the frozen schemas",
   CHECK(ParquetTable(trace.out_dir() + "/user_stat.parquet").rows() == 0);
   CHECK(ParquetTable(trace.out_dir() + "/memory_sample.parquet").rows() == 0);
   CHECK(ParquetTable(trace.out_dir() + "/message_type.parquet").rows() == 1);
+}
+
+TEST_CASE("Spilling to disk does not change any table",
+          "[reconstruction][spill][regression]") {
+  // Three PEs exchanging every kind of message the linkage distinguishes:
+  // unicasts (some to the sender itself), multicasts, broadcasts, a reused
+  // (src_pe, event) pair, thread resumes, ambiguous receivers, creations
+  // nobody received and receivers nobody sent to, over array elements that
+  // keep changing PE. Forcing a run every few records and merging two runs
+  // at a time puts every record through a run file and several merge passes.
+  std::vector<std::string> logs(3);
+  for (int src = 0; src < 3; ++src) {
+    for (int i = 0; i < 80; ++i) {
+      const int64_t t = 10000 + (1000 * i) + (100 * src);
+      const int dst = (src + i) % 3;
+      const int element = (i + src) % 6;
+      if (i % 15 == 0) {
+        logs[src] += bcast(i, t, 2, src, 3);
+      } else if (i % 10 == 0) {
+        logs[src] += mcast(i, t, 2, src, "0 2", 2);
+        for (const int d : {0, 1, 2})
+          logs[d] +=
+              begin(i, t + 50 + d, src, element) + end(i, t + 80 + d, src);
+      } else if (i % 13 == 6) {
+        logs[src] += "1 0 0 " + s(t) + " " + s(i) + " " + s(src) + " 64 1\n";
+        for (const int resume : {300, 200})
+          logs[dst] += "2 0 0 " + s(t + resume) + " " + s(i) + " " + s(src) +
+                       " 0 0 " + s(element) + " 0\n3 0 0 " +
+                       s(t + resume + 20) + " " + s(i) + " " + s(src) +
+                       " 0 0\n";
+      } else {
+        logs[src] += creation(i, t, 3, src);
+        if (i % 7 == 3)
+          continue;
+        logs[dst] +=
+            begin(i, t + 60, src, element, s(i % 4)) + end(i, t + 90, src);
+        if (i % 11 == 4)
+          logs[dst] += begin(i, t + 95, src, element) + end(i, t + 99, src);
+      }
+    }
+    logs[src] += creation(5, 95000, 1, src);
+    logs[(src + 1) % 3] +=
+        begin(900 + src, 96000, src, 2) + end(900 + src, 96100, src);
+  }
+
+  TempTrace in_memory(kSts);
+  in_memory.add_projrc(0, 0);
+  TempTrace spilled(kSts);
+  spilled.add_projrc(0, 0);
+  for (int pe = 0; pe < 3; ++pe) {
+    in_memory.add_log(pe, logs[pe]);
+    spilled.add_log(pe, logs[pe]);
+  }
+  run_all(in_memory);
+
+  charmvz::PipelineOptions options;
+  options.spill_every_n_records = 3;
+  options.merge_fan_in = 2;
+  options.io_buffer_bytes = 64;
+  std::filesystem::path spill_directory;
+  {
+    const auto result = run_all(spilled, options);
+    const auto &diagnostics = result.spill->diagnostics;
+    CHECK(diagnostics.creations.runs_written > 2);
+    CHECK(diagnostics.receivers.merge_passes > 0);
+    CHECK(diagnostics.locations.merge_passes > 0);
+    spill_directory = result.spill->directory().path();
+    CHECK(std::filesystem::exists(spill_directory));
+  }
+  CHECK_FALSE(std::filesystem::exists(spill_directory));
+
+  ParquetTable messages(in_memory.out_dir() + "/message.parquet");
+  REQUIRE(messages.rows() > 200);
+  REQUIRE(
+      ParquetTable(in_memory.out_dir() + "/migration_episode.parquet").rows() >
+      20);
+  int tables = 0;
+  for (const auto &file :
+       std::filesystem::directory_iterator(in_memory.out_dir())) {
+    INFO(file.path().filename().string());
+    ParquetTable a(file.path().string());
+    ParquetTable b(spilled.out_dir() + "/" + file.path().filename().string());
+    CHECK(a.equals(b));
+    ++tables;
+  }
+  CHECK(tables == 13);
 }

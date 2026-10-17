@@ -2,8 +2,10 @@
 #include "rc_parser.h"
 #include "spill.h"
 #include "sts_parser.h"
+#include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -57,6 +59,38 @@ inline auto record_heap_bytes(const CreationRecord &record) -> std::size_t {
   return record.dst_pes.capacity() * sizeof(int32_t);
 }
 
+template <> struct RunCodec<CreationRecord> {
+  static constexpr uint32_t type_id = 1;
+  static void encode(RunWriter &out, const CreationRecord &r) {
+    out.put(r.src_pe);
+    out.put(r.event);
+    out.put(r.ep_id);
+    out.put(r.msg_idx);
+    out.put(r.msg_len);
+    out.put(r.send_time_us);
+    out.put(r.send_to_enqueue_us);
+    out.put(static_cast<uint8_t>(r.is_broadcast));
+    out.put(r.broadcast_fanout);
+    out.put(r.seq);
+    out.put(static_cast<uint32_t>(r.dst_pes.size()));
+    out.put_bytes(r.dst_pes.data(), r.dst_pes.size() * sizeof(int32_t));
+  }
+  static void decode(RunReader &in, CreationRecord &r) {
+    r.src_pe = in.get<int32_t>();
+    r.event = in.get<int32_t>();
+    r.ep_id = in.get<int32_t>();
+    r.msg_idx = in.get<int32_t>();
+    r.msg_len = in.get<int32_t>();
+    r.send_time_us = in.get<int64_t>();
+    r.send_to_enqueue_us = in.get<int64_t>();
+    r.is_broadcast = in.get<uint8_t>() != 0;
+    r.broadcast_fanout = in.get<int32_t>();
+    r.seq = in.get<int64_t>();
+    r.dst_pes.resize(in.get<uint32_t>());
+    in.get_bytes(r.dst_pes.data(), r.dst_pes.size() * sizeof(int32_t));
+  }
+};
+
 struct CreationOrder {
   auto operator()(const CreationRecord &a, const CreationRecord &b) const
       -> bool {
@@ -82,6 +116,26 @@ struct InstanceLocationRecord {
   int64_t start_time_us;
   int64_t end_time_us;
   bool has_end_time;
+};
+
+template <> struct RunCodec<InstanceLocationRecord> {
+  static constexpr uint32_t type_id = 3;
+  static void encode(RunWriter &out, const InstanceLocationRecord &r) {
+    out.put(r.instance_id);
+    out.put(r.collection_id);
+    out.put(r.pe_id);
+    out.put(r.start_time_us);
+    out.put(r.end_time_us);
+    out.put(static_cast<uint8_t>(r.has_end_time));
+  }
+  static void decode(RunReader &in, InstanceLocationRecord &r) {
+    r.instance_id = in.get<int64_t>();
+    r.collection_id = in.get<int32_t>();
+    r.pe_id = in.get<int32_t>();
+    r.start_time_us = in.get<int64_t>();
+    r.end_time_us = in.get<int64_t>();
+    r.has_end_time = in.get<uint8_t>() != 0;
+  }
 };
 
 // Executions of one instance in time order. The trailing fields only break
@@ -138,6 +192,32 @@ struct BeginProcessingRecord {
   int64_t instance_id;
   int64_t recv_time_us;
   int64_t exec_start_time_us;
+};
+
+template <> struct RunCodec<BeginProcessingRecord> {
+  static constexpr uint32_t type_id = 2;
+  static void encode(RunWriter &out, const BeginProcessingRecord &r) {
+    out.put(r.src_pe);
+    out.put(r.event);
+    out.put(r.dst_pe);
+    out.put(r.ep_id);
+    out.put(r.msg_len);
+    out.put(static_cast<uint8_t>(r.has_recv_time));
+    out.put(r.instance_id);
+    out.put(r.recv_time_us);
+    out.put(r.exec_start_time_us);
+  }
+  static void decode(RunReader &in, BeginProcessingRecord &r) {
+    r.src_pe = in.get<int32_t>();
+    r.event = in.get<int32_t>();
+    r.dst_pe = in.get<int32_t>();
+    r.ep_id = in.get<int32_t>();
+    r.msg_len = in.get<int32_t>();
+    r.has_recv_time = in.get<uint8_t>() != 0;
+    r.instance_id = in.get<int64_t>();
+    r.recv_time_us = in.get<int64_t>();
+    r.exec_start_time_us = in.get<int64_t>();
+  }
 };
 
 // The pair a receiver is linked to its creation by.
@@ -259,6 +339,28 @@ struct LogParserResult {
   // this holds one entry per (timestep, PE) however often the application
   // reuses the event.
   std::map<std::pair<int32_t, int32_t>, StepExtent> step_boundaries;
+  // Where the three sorters spill, and what spilling did. Always present;
+  // without a budget it has no directory and nothing is written.
+  std::unique_ptr<SpillContext> spill;
+};
+
+// How Stage 2 and 3 may use memory and disk.
+struct PipelineOptions {
+  // Bytes the conversion should stay within; 0 means no budget, in which case
+  // nothing is ever written to disk.
+  uint64_t memory_budget = 0;
+  // Parent of the per-run spill directory. Empty: the system temp directory.
+  std::filesystem::path spill_root;
+  bool keep_spill = false;
+
+  // Test hooks. Spilling every N pushes exercises run files and merges on
+  // fixtures far too small to reach any real budget.
+  uint64_t spill_every_n_records = 0;
+  std::size_t merge_fan_in = 64;
+  // 0 derives each from the budget.
+  std::size_t io_buffer_bytes = 0;
+  uint64_t max_group_bytes = 0;
+  uint64_t fail_spill_writes_after_bytes = 0;
 };
 
 // `step_event_id` selects the registered user event whose brackets delimit a
@@ -266,12 +368,15 @@ struct LogParserResult {
 //
 // Throws std::runtime_error when a BEGIN_PROCESSING names an entry method the
 // STS does not register: its index arity is then unknown and the rest of the
-// record cannot be read, so the conversion aborts rather than guessing.
+// record cannot be read, so the conversion aborts rather than guessing. Also
+// throws when spilling is needed and the spill directory cannot be created or
+// written.
 constexpr int32_t NO_STEP_EVENT = -1;
 
 auto process_logs(const std::vector<std::string> &log_file_paths,
                   const StsData &sts_data, const RcData &rc_data,
                   const std::string &output_dir,
-                  int32_t step_event_id = NO_STEP_EVENT) -> LogParserResult;
+                  int32_t step_event_id = NO_STEP_EVENT,
+                  const PipelineOptions &options = {}) -> LogParserResult;
 
 } // namespace charmvz
