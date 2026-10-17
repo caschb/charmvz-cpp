@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import polars as pl
 
-from ..derived import compute_entry_spans, compute_idle_spans
+from ..derived import compute_idle_spans, execution_rows
 from ..engine import collect
 
 if TYPE_CHECKING:
@@ -62,29 +62,64 @@ _SUMMARY_SCHEMA: dict[str, pl.DataType] = {
 }
 
 
+def _exact_medians(counts: pl.DataFrame) -> pl.DataFrame:
+    """Per-EP median of ``wall_duration_us`` from ``(ep_id, value, _n)`` counts.
+
+    Equal to ``median()`` over the expanded values: the mean of the two middle
+    values, which are the same value for an odd count. A trace has few distinct
+    durations per entry method (19,799 pairs across 88.5M ChaNGa executions),
+    so this is a small table where ``median()`` over the executions is not a
+    streaming aggregate and has to hold them all.
+    """
+    duration, n = pl.col("wall_duration_us"), pl.col("_n")
+    before, through = pl.col("_before"), pl.col("_through")
+
+    def value_at(position: pl.Expr) -> pl.Expr:
+        return duration.filter((before <= position) & (position < through)).first()
+
+    total = pl.col("_total")
+    return (
+        counts.sort("ep_id", "wall_duration_us")
+        .with_columns(
+            n.cum_sum().over("ep_id").alias("_through"),
+            n.sum().over("ep_id").alias("_total"),
+        )
+        .with_columns((pl.col("_through") - n).alias("_before"))
+        .group_by("ep_id")
+        .agg(
+            value_at((total - 1) // 2).alias("_lo"),
+            value_at(total // 2).alias("_hi"),
+        )
+        .select("ep_id", ((pl.col("_lo") + pl.col("_hi")) / 2).alias("_median_us"))
+    )
+
+
 def _execution_candidates(
     ds: TraceDataset,
     pes: Sequence[int] | None,
     time_range: tuple[int, int],
     bin_width_us: int,
-) -> pl.LazyFrame:
+) -> pl.DataFrame:
     """Executions running longer than the median for their own entry method."""
-    spans = compute_entry_spans(ds, pes=pes, time_range=time_range).select(
-        "pe_id",
-        "ep_id",
-        "start_time_us",
-        "wall_duration_us",
+    spans = execution_rows(
+        ds,
+        pes=pes,
+        time_range=time_range,
+        columns=["pe_id", "ep_id", "start_time_us", "wall_duration_us"],
     )
 
     # The median is taken per EP and across all PEs: noise is what makes one
     # invocation differ from its own siblings, so the comparison has to be
     # against the same entry method rather than against the trace at large.
-    medians = spans.group_by("ep_id").agg(
-        pl.col("wall_duration_us").median().alias("_median_us"),
+    counts = collect(
+        spans.filter(pl.col("wall_duration_us").is_not_null())
+        .group_by("ep_id", "wall_duration_us")
+        .agg(pl.len().alias("_n"))
     )
+    medians = _exact_medians(counts)
 
-    return (
-        spans.join(medians, on="ep_id", how="left")
+    return collect(
+        spans.join(medians.lazy(), on="ep_id", how="left")
         .with_columns(
             (pl.col("wall_duration_us") - pl.col("_median_us")).alias("_noise_us"),
         )
@@ -103,7 +138,7 @@ def _idle_gap_candidates(
     pes: Sequence[int] | None,
     time_range: tuple[int, int],
     bin_width_us: int,
-) -> pl.LazyFrame:
+) -> pl.DataFrame:
     """Wall-clock time accounted for by neither an execution nor an idle interval.
 
     Executions and idle intervals are merged into one set of occupied spans per
@@ -111,43 +146,52 @@ def _idle_gap_candidates(
     merge is done with a running maximum of the end time rather than by pairing
     spans, because executions and idle intervals can overlap in a trace and a
     naive gap computation would report the overlap as negative time.
+
+    The sort and running maximum need every span of a PE in memory, so the PEs
+    are processed one at a time: the peak is the busiest PE's spans rather
+    than the whole trace's. Of two spans starting together, whichever sorts
+    second has a running maximum past its start, so the order of ties cannot
+    change the gaps.
     """
-    execs = compute_entry_spans(ds, pes=pes, time_range=time_range).select(
-        "pe_id",
-        "start_time_us",
-        "end_time_us",
-    )
-    idles = compute_idle_spans(ds, pes=pes, time_range=time_range).select(
-        "pe_id",
-        "start_time_us",
-        "end_time_us",
-    )
+    if pes is None:
+        pe_ids = collect(ds.processing_element.select("pe_id"))["pe_id"].to_list()
+    else:
+        pe_ids = list(pes)
 
-    occupied = pl.concat([execs, idles], how="vertical").with_columns(
-        # An unterminated span covers only its own start, which keeps a null end
-        # from swallowing the running maximum.
-        pl.col("end_time_us").fill_null(pl.col("start_time_us")),
-    )
-
-    return (
-        occupied.sort("pe_id", "start_time_us")
-        .with_columns(
-            pl.col("end_time_us")
-            .cum_max()
-            .shift(1)
-            .over("pe_id")
-            .alias("_prev_end_us"),
+    gaps = []
+    for pe in sorted(set(pe_ids)):
+        execs = execution_rows(
+            ds, pes=[pe], time_range=time_range, columns=["start_time_us", "end_time_us"]
         )
-        .with_columns(
-            (pl.col("start_time_us") - pl.col("_prev_end_us")).alias("_noise_us"),
+        idles = compute_idle_spans(ds, pes=[pe], time_range=time_range).select(
+            "start_time_us",
+            "end_time_us",
         )
-        .filter(pl.col("_noise_us") >= bin_width_us)
-        .select(
-            pl.lit("idle_gap", dtype=pl.String).alias("kind"),
-            pl.col("pe_id"),
-            pl.col("_prev_end_us").alias("time_us"),
-            pl.col("_noise_us").cast(pl.Int64).alias("noise_us"),
+        occupied = collect(
+            pl.concat([execs, idles], how="vertical").with_columns(
+                # An unterminated span covers only its own start, which keeps a
+                # null end from swallowing the running maximum.
+                pl.col("end_time_us").fill_null(pl.col("start_time_us")),
+            )
         )
+        gaps.append(
+            occupied.sort("start_time_us")
+            .with_columns(
+                pl.col("end_time_us").cum_max().shift(1).alias("_prev_end_us"),
+            )
+            .with_columns(
+                (pl.col("start_time_us") - pl.col("_prev_end_us")).alias("_noise_us"),
+            )
+            .filter(pl.col("_noise_us") >= bin_width_us)
+            .select(
+                pl.lit("idle_gap", dtype=pl.String).alias("kind"),
+                pl.lit(pe, dtype=pl.Int32).alias("pe_id"),
+                pl.col("_prev_end_us").alias("time_us"),
+                pl.col("_noise_us").cast(pl.Int64).alias("noise_us"),
+            )
+        )
+    return pl.concat(gaps, how="vertical") if gaps else pl.DataFrame(
+        schema={k: _OCCURRENCE_SCHEMA[k] for k in ("kind", "pe_id", "time_us", "noise_us")}
     )
 
 
@@ -347,16 +391,13 @@ def _detect(
     n_pes = len(pes) if pes is not None else ds.num_pes
     total_runtime_us = window_us * max(1, n_pes)
 
-    candidates = collect(
-        pl.concat(
-            [
-                _execution_candidates(ds, pes, tr, bin_width_us),
-                _idle_gap_candidates(ds, pes, tr, bin_width_us),
-            ],
-            how="vertical",
-        )
-        .with_columns((pl.col("noise_us") // bin_width_us).alias("bin_idx"))
-    )
+    candidates = pl.concat(
+        [
+            _execution_candidates(ds, pes, tr, bin_width_us),
+            _idle_gap_candidates(ds, pes, tr, bin_width_us),
+        ],
+        how="vertical",
+    ).with_columns((pl.col("noise_us") // bin_width_us).alias("bin_idx"))
 
     if candidates.is_empty():
         return (
