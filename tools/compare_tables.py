@@ -69,6 +69,46 @@ def first_difference(a: pa.Table, b: pa.Table) -> str:
     return "tables differ"
 
 
+def rebatched(path: pathlib.Path, size: int):
+    """Yields slices of exactly `size` rows (the last may be shorter), so two
+    files with different row-group layouts can be walked in lockstep."""
+    # Row group by row group, not ParquetFile.iter_batches: on an 88M-row
+    # execution table the latter keeps growing the Arrow pool (over 4 GiB)
+    # while reading row groups stays flat.
+    pending: list[pa.RecordBatch] = []
+    held = 0
+    file = pq.ParquetFile(path)
+    for group in range(file.num_row_groups):
+        batch = file.read_row_group(group)
+        pending.extend(batch.to_batches())
+        held += batch.num_rows
+        while held >= size:
+            t = pa.Table.from_batches(pending)
+            yield t.slice(0, size)
+            rest = t.slice(size)
+            pending, held = rest.to_batches(), rest.num_rows
+    if held:
+        yield pa.Table.from_batches(pending)
+
+
+def compare_exact(a: pathlib.Path, b: pathlib.Path) -> str | None:
+    """Streams both files: whole 88M-row tables need over 20 GB of RAM."""
+    fa, fb = pq.ParquetFile(a), pq.ParquetFile(b)
+    if fa.schema_arrow != fb.schema_arrow:
+        return f"schemas differ:\n{fa.schema_arrow}\n---\n{fb.schema_arrow}"
+    rows_a, rows_b = fa.metadata.num_rows, fb.metadata.num_rows
+    if rows_a != rows_b:
+        return f"row counts differ: {rows_a} vs {rows_b}"
+    size = 1 << 16
+    offset = 0
+    for x, y in zip(rebatched(a, size), rebatched(b, size)):
+        if not x.equals(y):
+            detail = first_difference(x, y)
+            return f"from row {offset}: {detail}"
+        offset += x.num_rows
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -87,6 +127,16 @@ def main() -> int:
         ok = False
 
     for name in sorted(left & right):
+        if args.exact:
+            difference = compare_exact(args.left / f"{name}.parquet",
+                                       args.right / f"{name}.parquet")
+            if difference is None:
+                rows = pq.ParquetFile(args.left / f"{name}.parquet").metadata.num_rows
+                print(f"identical  {name} ({rows} rows)")
+            else:
+                print(f"DIFFERENT  {name}: {difference}")
+                ok = False
+            continue
         a = pq.read_table(args.left / f"{name}.parquet")
         b = pq.read_table(args.right / f"{name}.parquet")
         if args.canonical:
