@@ -170,12 +170,26 @@ class TestPaperDerivedMetrics:
     ) -> None:
         imbalance = cumulative_percent_imbalance_by_time(
             ds,
-            time_points_us=[1_000_000, 2_000_000],
+            time_points_us=[250_000, 1_000_000, 2_000_000],
             total_nodes=4,
         ).collect()
         values = imbalance["percent_imbalance"].to_list()
-        assert values[0] == pytest.approx(10.0)
-        assert values[1] == pytest.approx(21.2121212)
+        # PE 3 has not started by 250 ms: the mean is over the three nodes
+        # that have, (300 + 500 + 450) / 3 ms, not over all four.
+        assert values[0] == pytest.approx(20.0)
+        assert values[1] == pytest.approx(10.0)
+        assert values[2] == pytest.approx(21.2121212)
+
+    def test_equally_spaced_points_match_explicit_points(self, ds: TraceDataset) -> None:
+        # The default points are bucketed arithmetically, explicit ones by
+        # search. The last default point equals the latest start, which must
+        # not count toward it.
+        default = cumulative_percent_imbalance_by_time(ds, total_time_points=5).collect()
+        explicit = cumulative_percent_imbalance_by_time(
+            ds, time_points_us=default["time_point_us"].to_list()
+        ).collect()
+        assert default.height == 4
+        assert default.equals(explicit)
 
 
 class TestUtilization:

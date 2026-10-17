@@ -442,6 +442,109 @@ def percent_imbalance_by_bin(
     )
 
 
+def _buckets_equally_spaced(
+    spans: pl.LazyFrame, points: list[float], first: float, step: float, total_nodes: int
+) -> pl.DataFrame:
+    """Load and row count per ``(node, k)``, ``k`` = number of points <= start.
+
+    ``points`` are ``first + i * step`` for ``i = 1..len(points)``, so ``k`` is
+    estimated arithmetically and corrected by one step against the points
+    themselves; a final check that every start lies in its bucket guards the
+    estimate. A join against a table of ``len(points) + 1`` rows is all the
+    streaming engine has to hold.
+    """
+    n_points = len(points)
+    # Row k holds points k - 1 .. k + 2 (1-based, infinite past either end):
+    # the bounds of bucket k, and those of its neighbours to check a
+    # one-step correction without joining again.
+    inf = float("inf")
+    padded = [-inf, -inf, *points, inf, inf]
+    lookup = pl.LazyFrame(
+        {
+            "_k": list(range(n_points + 1)),
+            "_below2": padded[0 : n_points + 1],
+            "_below": padded[1 : n_points + 2],
+            "_at": padded[2 : n_points + 3],
+            "_at2": padded[3 : n_points + 4],
+        },
+        schema={
+            "_k": pl.Int64,
+            "_below2": pl.Float64,
+            "_below": pl.Float64,
+            "_at": pl.Float64,
+            "_at2": pl.Float64,
+        },
+    )
+    s = pl.col("start_time_us").cast(pl.Float64)
+    if step > 0:
+        estimate = ((s - first) / step).floor().cast(pl.Int64).clip(0, n_points)
+    else:
+        estimate = pl.lit(0, dtype=pl.Int64)
+    early, late = s < pl.col("_below"), s >= pl.col("_at")
+    outside = (early & (s < pl.col("_below2"))) | (late & (s >= pl.col("_at2")))
+    buckets = collect(
+        spans.select("pe_id", "start_time_us", "wall_duration_us", estimate.alias("_k"))
+        .join(lookup, on="_k", how="left")
+        .group_by(
+            (pl.col("pe_id") % total_nodes).alias("node"),
+            pl.col("_k") - early.cast(pl.Int64) + late.cast(pl.Int64),
+        )
+        .agg(
+            pl.col("wall_duration_us").sum().alias("load_us"),
+            pl.len().alias("rows"),
+            outside.sum().alias("_outside"),
+        )
+    )
+    if buckets["_outside"].sum() > 0:
+        raise RuntimeError("time point bucket estimate did not converge")
+    return buckets.drop("_outside")
+
+
+def _buckets_per_pe(
+    ds: TraceDataset,
+    pes: Sequence[int] | None,
+    time_range: tuple[int, int] | None,
+    points: list[float],
+    total_nodes: int,
+) -> pl.DataFrame:
+    """:func:`_buckets_equally_spaced` for arbitrary sorted ``points``.
+
+    Bucketing by search is not streaming-safe, so the starts are searched one
+    PE at a time; the peak is the busiest PE's executions.
+    """
+    pe_ids = (
+        collect(ds.processing_element.select("pe_id"))["pe_id"].to_list()
+        if pes is None
+        else sorted(set(pes))
+    )
+    sorted_points = np.asarray(points, dtype=np.float64)
+    parts = []
+    for pe in pe_ids:
+        rows = collect(
+            execution_rows(
+                ds, pes=[pe], time_range=time_range,
+                columns=["pe_id", "start_time_us", "wall_duration_us"],
+            ).filter(pl.col("start_time_us").is_not_null())
+        )
+        k = np.searchsorted(
+            sorted_points, rows["start_time_us"].to_numpy().astype(np.float64), side="right"
+        )
+        parts.append(
+            rows.with_columns(pl.Series("_k", k, dtype=pl.Int64))
+            .group_by((pl.col("pe_id") % total_nodes).alias("node"), "_k")
+            .agg(pl.col("wall_duration_us").sum().alias("load_us"), pl.len().alias("rows"))
+        )
+    if not parts:
+        return pl.DataFrame(
+            schema={"node": pl.Int32, "_k": pl.Int64, "load_us": pl.Int64, "rows": pl.UInt32}
+        )
+    return (
+        pl.concat(parts)
+        .group_by("node", "_k")
+        .agg(pl.col("load_us").sum(), pl.col("rows").sum())
+    )
+
+
 def cumulative_percent_imbalance_by_time(
     ds: TraceDataset,
     *,
@@ -457,18 +560,24 @@ def cumulative_percent_imbalance_by_time(
     for each sampled time point, include every execution whose start time is
     earlier than that point, group load by ``pe_id % total_nodes``, and compute
     ``((max(load) / mean(load)) - 1) * 100``.  Durations are not clipped at the
-    sampled time point.
+    sampled time point. A node with no execution before a point is left out of
+    that point's max and mean rather than counted as zero load.
+
+    Each execution is counted once, in the bucket between the two points that
+    enclose its start, and the per-point loads are cumulative sums over the
+    buckets. For the default equally spaced points the buckets are computed in
+    one streaming pass; explicit ``time_points_us`` are bucketed one PE at a
+    time, which holds the busiest PE's executions in memory.
     """
     if total_nodes <= 0:
         raise ValueError("total_nodes must be positive")
     if total_time_points < 2 and time_points_us is None:
         raise ValueError("total_time_points must be at least 2")
 
-    spans = compute_entry_spans(ds, pes=pes, time_range=time_range).select(
-        "pe_id",
-        "start_time_us",
-        "wall_duration_us",
-    )
+    spans = execution_rows(
+        ds, pes=pes, time_range=time_range,
+        columns=["pe_id", "start_time_us", "wall_duration_us"],
+    ).filter(pl.col("start_time_us").is_not_null())
 
     if time_points_us is None:
         bounds = collect(
@@ -483,40 +592,63 @@ def cumulative_percent_imbalance_by_time(
             points: list[float] = []
         elif min_start == max_start:
             points = [float(max_start)]
+            step = 0.0
         else:
             step = (max_start - min_start) / (total_time_points - 1)
             points = [min_start + i * step for i in range(1, total_time_points)]
     else:
         points = [float(point) for point in time_points_us]
 
+    schema = {
+        "time_point_us": pl.Float64,
+        "max_load_us": pl.Int64,
+        "mean_load_us": pl.Float64,
+        "percent_imbalance": pl.Float64,
+    }
     if not points:
-        return pl.LazyFrame(
-            schema={
-                "time_point_us": pl.Float64,
-                "max_load_us": pl.Int64,
-                "mean_load_us": pl.Float64,
-                "percent_imbalance": pl.Float64,
-            }
-        )
+        return pl.LazyFrame(schema=schema)
 
-    time_points = pl.LazyFrame({"time_point_us": points})
-    node_loads = (
-        spans.with_columns((pl.col("pe_id") % total_nodes).alias("node"))
-        .join(time_points, how="cross")
-        .filter(pl.col("start_time_us") < pl.col("time_point_us"))
-        .group_by("time_point_us", "node")
-        .agg(pl.col("wall_duration_us").sum().alias("load_us"))
+    unique_points = sorted(set(points))
+    n_points = len(unique_points)
+    if time_points_us is None:
+        buckets = _buckets_equally_spaced(
+            spans, unique_points, float(min_start), step, total_nodes
+        )
+    else:
+        buckets = _buckets_per_pe(ds, pes, time_range, unique_points, total_nodes)
+
+    # Point j (0-based) covers the starts in buckets 0..j; bucket n_points
+    # holds starts at or after the last point and never counts.
+    grid = buckets.select("node").unique().join(
+        pl.DataFrame({"_k": list(range(n_points))}, schema={"_k": pl.Int64}), how="cross"
+    )
+    cumulative = (
+        grid.join(buckets, on=["node", "_k"], how="left", nulls_equal=True)
+        .with_columns(pl.col("load_us").fill_null(0), pl.col("rows").fill_null(0))
+        .sort("node", "_k", nulls_last=True)
+        .with_columns(
+            pl.col("load_us").cum_sum().over("node").alias("load_us"),
+            pl.col("rows").cum_sum().over("node").alias("rows"),
+        )
+    )
+    per_point = (
+        cumulative.filter(pl.col("rows") > 0)
+        .group_by("_k")
+        .agg(
+            pl.col("load_us").max().alias("max_load_us"),
+            pl.col("load_us").mean().alias("mean_load_us"),
+        )
+    )
+    table = (
+        pl.DataFrame({"time_point_us": unique_points, "_k": list(range(n_points))},
+                     schema={"time_point_us": pl.Float64, "_k": pl.Int64})
+        .join(per_point, on="_k", how="left")
+        .drop("_k")
     )
 
     return (
-        time_points.join(
-            node_loads.group_by("time_point_us").agg(
-                pl.col("load_us").max().alias("max_load_us"),
-                pl.col("load_us").mean().alias("mean_load_us"),
-            ),
-            on="time_point_us",
-            how="left",
-        )
+        pl.LazyFrame({"time_point_us": points}, schema={"time_point_us": pl.Float64})
+        .join(table.lazy(), on="time_point_us", how="left")
         .with_columns(
             pl.when(pl.col("mean_load_us") > 0)
             .then(((pl.col("max_load_us") / pl.col("mean_load_us")) - 1) * 100)
@@ -527,6 +659,7 @@ def cumulative_percent_imbalance_by_time(
             pl.col("max_load_us").fill_null(0),
             pl.col("mean_load_us").fill_null(0.0),
         )
+        .select(list(schema))
         .sort("time_point_us")
     )
 
