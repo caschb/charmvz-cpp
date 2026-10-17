@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import numpy as np
 import polars as pl
 import pytest
 
 from charmvz_vis import TraceDataset
 from charmvz_vis.analysis import load_imbalance_score, per_pe_utilization
 from charmvz_vis.derived import (
+    _histogram,
     bin_loads,
     chare_duration_totals,
     chare_frequency_counts,
     cumulative_percent_imbalance_by_time,
+    duration_histogram,
     percent_imbalance_by_bin,
 )
 
@@ -93,6 +96,43 @@ class TestBinLoads:
             (1, 0, 40),
             (1, 400, 50),
         ]
+
+
+class TestDurationHistogram:
+    @pytest.mark.parametrize("log_scale", [False, True])
+    @pytest.mark.parametrize("n_bins", [5, 13, 50])
+    def test_matches_numpy(self, ds: TraceDataset, n_bins: int, log_scale: bool) -> None:
+        durations_ms = ds.execution.collect()["wall_duration_us"].to_numpy() / 1000.0
+        if log_scale:
+            # logspace rounds the first edge above the 300 ms minimum, so numpy
+            # leaves both 300 ms executions out.
+            bins = np.logspace(np.log10(durations_ms.min()), np.log10(durations_ms.max()), n_bins)
+        else:
+            bins = n_bins
+        expected_counts, expected_edges = np.histogram(durations_ms, bins=bins)
+
+        edges, counts = duration_histogram(ds, n_bins, log_scale)
+        np.testing.assert_array_equal(edges, expected_edges)
+        np.testing.assert_array_equal(counts, expected_counts)
+
+    @pytest.mark.parametrize(("log_scale", "n_bins"), [(False, 5), (True, 13)])
+    def test_values_on_and_just_below_edges(self, log_scale: bool, n_bins: int) -> None:
+        # Over [0.3, 0.8] these edges and their predecessors include values
+        # whose arithmetic (or log-space) bin index is one off from numpy's in
+        # each direction, so only the correction step gets them right.
+        if log_scale:
+            edges = np.logspace(np.log10(0.3), np.log10(0.8), n_bins)
+        else:
+            edges = np.linspace(0.3, 0.8, n_bins + 1)
+        inner = edges[1:-1]
+        values = np.concatenate([[0.3, 0.8], inner, np.nextafter(inner, -np.inf)])
+        expected_counts, expected_edges = np.histogram(
+            values, bins=edges if log_scale else n_bins
+        )
+
+        edges, counts = _histogram(pl.LazyFrame({"x": values}), n_bins, log_scale)
+        np.testing.assert_array_equal(edges, expected_edges)
+        np.testing.assert_array_equal(counts, expected_counts)
 
 
 class TestPaperDerivedMetrics:

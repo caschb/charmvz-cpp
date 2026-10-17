@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, Sequence, TypeVar
 
+import numpy as np
 import polars as pl
 
 from .engine import collect
@@ -546,3 +547,119 @@ def chare_load_by_bin(
     return _by_chare(per_ep, ds, ["pe_id", "bin_start"]).sort(
         "pe_id", "bin_start", "load_us", descending=[False, False, True]
     )
+
+
+def _histogram(
+    values: pl.LazyFrame, n_bins: int, log_scale: bool
+) -> tuple[np.ndarray, np.ndarray]:
+    """``np.histogram`` of the column ``x`` without materialising the column.
+
+    Uniform bins follow numpy's own algorithm step for step: edges from
+    ``np.linspace`` over ``[min, max]``, an arithmetic bin index, and one
+    correction against the edges for rounding within an ULP of an edge, so the
+    counts are numpy's exactly. Log bins take their edges from ``np.logspace``
+    as the plots always have; numpy then bins by search, which is reproduced
+    by estimating the index in log space, correcting it by one step, and
+    checking every value landed inside its bin.
+
+    Returns ``(edges, counts)``, both empty when no value qualifies.
+    """
+    x = pl.col("x")
+    if log_scale:
+        values = values.filter(x > 0)
+    lo, hi = collect(values.select(x.min(), x.max().alias("hi"))).row(0)
+    if lo is None:
+        return np.empty(0), np.empty(0, dtype=np.int64)
+
+    if log_scale:
+        edges = np.logspace(np.log10(lo), np.log10(hi), n_bins)
+        n = len(edges) - 1
+        # Rounding in logspace can put the outer edges inside [min, max], and
+        # numpy drops values outside the edges.
+        values = values.filter((x >= edges[0]) & (x <= edges[-1]))
+        log_lo, log_hi = np.log10(edges[0]), np.log10(edges[-1])
+        if log_hi > log_lo:
+            estimate = ((x.log10() - log_lo) / (log_hi - log_lo) * n).floor()
+        else:
+            estimate = pl.lit(n - 1)
+        estimate = estimate.cast(pl.Int64).clip(0, n - 1)
+    else:
+        if lo == hi:
+            lo, hi = lo - 0.5, hi + 0.5
+        edges = np.linspace(lo, hi, n_bins + 1)
+        n = n_bins
+        estimate = ((x - lo) / (hi - lo) * n).cast(pl.Int64)
+        estimate = pl.when(estimate == n).then(n - 1).otherwise(estimate)
+
+    bounds = pl.LazyFrame(
+        {"_k": np.arange(n, dtype=np.int64), "_lo": edges[:-1], "_hi": edges[1:]}
+    )
+    k = pl.col("_k")
+    below = x < pl.col("_lo")
+    above = ~below & (x >= pl.col("_hi")) & (k != n - 1)
+    binned = (
+        values.select("x", estimate.alias("_k"))
+        .join(bounds, on="_k", how="left")
+        .select("x", (k - below.cast(pl.Int64) + above.cast(pl.Int64)).alias("_k"))
+    )
+    if log_scale:
+        last_closed = (k == n - 1) & (x <= pl.col("_hi"))
+        inside = (x >= pl.col("_lo")) & ((x < pl.col("_hi")) | last_closed)
+        binned = binned.join(bounds, on="_k", how="left").with_columns(
+            (~inside).alias("_outside")
+        )
+        agg = [pl.len().alias("count"), pl.col("_outside").sum()]
+    else:
+        agg = [pl.len().alias("count")]
+
+    per_bin = collect(binned.group_by("_k").agg(agg))
+    if log_scale and per_bin["_outside"].sum() > 0:
+        raise RuntimeError("log histogram bin estimate did not converge")
+    counts = np.zeros(n, dtype=np.int64)
+    counts[per_bin["_k"].to_numpy()] = per_bin["count"].to_numpy()
+    return edges, counts
+
+
+def duration_histogram(
+    ds: TraceDataset,
+    n_bins: int = 50,
+    log_scale: bool = False,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+    ep_ids: Sequence[int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Histogram ``(edges, counts)`` of execution wall durations in ms.
+
+    ``n_bins`` is the number of bins, or with ``log_scale`` the number of
+    log-spaced edges (one bin fewer). With ``log_scale`` only positive
+    durations count.
+    """
+    lf = execution_rows(ds, pes=pes, time_range=time_range or ds.time_range_us)
+    if ep_ids is not None:
+        lf = lf.filter(pl.col("ep_id").is_in(list(ep_ids)))
+    values = lf.select((pl.col("wall_duration_us") / 1000.0).alias("x")).drop_nulls()
+    return _histogram(values, n_bins, log_scale)
+
+
+def message_size_histogram_counts(
+    ds: TraceDataset,
+    n_bins: int = 50,
+    log_scale: bool = True,
+    pes: Sequence[int] | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Histogram ``(edges, counts)`` of message sizes in bytes.
+
+    Filters on the source PE and the send time, and bins like
+    :func:`duration_histogram`.
+    """
+    lf = apply_filters(
+        ds.message,
+        pes=pes,
+        time_range=time_range or ds.time_range_us,
+        pe_col="src_pe",
+        start_col="send_time_us",
+        end_col=None,
+    )
+    values = lf.select(pl.col("msg_len").cast(pl.Float64).alias("x")).drop_nulls()
+    return _histogram(values, n_bins, log_scale)

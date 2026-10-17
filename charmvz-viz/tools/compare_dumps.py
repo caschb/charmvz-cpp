@@ -6,8 +6,8 @@
 Tables are compared after sorting both sides on every column, so a different
 row order is not a difference; integer and string columns must be equal,
 float columns equal within a relative 1e-9. Figure dumps are compared element
-by element with the same float tolerance. Items present on only one side are
-listed.
+by element with the same float tolerance plus an absolute 1e-12. Items present
+on only one side are listed.
 
 Exit status 0 when every common item matches, 1 otherwise.
 """
@@ -24,6 +24,10 @@ import polars as pl
 from polars.testing import assert_frame_equal
 
 RTOL = 1e-9
+# Figure geometry only: matplotlib's hist places a bar at center - width/2,
+# which is a few ULPs off a bar placed at its left edge, and relative
+# tolerance alone cannot absorb that next to 0.
+FIG_ATOL = 1e-12
 
 
 def compare_tables(a: pl.DataFrame, b: pl.DataFrame) -> str | None:
@@ -45,8 +49,8 @@ def compare_values(a, b, path: str) -> str | None:
         if a.shape != b.shape:
             return f"{path}: shape {a.shape} vs {b.shape}"
         if a.dtype.kind in "fc" or b.dtype.kind in "fc":
-            if not np.allclose(a, b, rtol=RTOL, atol=0, equal_nan=True):
-                bad = np.flatnonzero(~np.isclose(a, b, rtol=RTOL, atol=0, equal_nan=True))
+            if not np.allclose(a, b, rtol=RTOL, atol=FIG_ATOL, equal_nan=True):
+                bad = np.flatnonzero(~np.isclose(a, b, rtol=RTOL, atol=FIG_ATOL, equal_nan=True))
                 i = bad[0]
                 return (f"{path}: {bad.size} values differ, first at flat index {i}: "
                         f"{a.flat[i]!r} vs {b.flat[i]!r}")
@@ -69,7 +73,7 @@ def compare_values(a, b, path: str) -> str | None:
     if isinstance(a, float) or isinstance(b, float):
         if a is None or b is None:
             return None if a is b else f"{path}: {a!r} vs {b!r}"
-        if math.isclose(a, b, rel_tol=RTOL, abs_tol=0) or (math.isnan(a) and math.isnan(b)):
+        if math.isclose(a, b, rel_tol=RTOL, abs_tol=FIG_ATOL) or (math.isnan(a) and math.isnan(b)):
             return None
         return f"{path}: {a!r} vs {b!r}"
     return None if a == b else f"{path}: {a!r} vs {b!r}"

@@ -13,10 +13,8 @@ from typing import TYPE_CHECKING, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-import polars as pl
 
-from ..derived import compute_entry_spans
-from ..engine import collect
+from ..derived import duration_histogram, message_size_histogram_counts
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -52,40 +50,22 @@ def execution_time_histogram(
     -------
     matplotlib Figure
     """
-    tr = time_range or ds.time_range_us
-    spans = compute_entry_spans(ds, pes=pes, time_range=tr)
+    edges, counts = duration_histogram(
+        ds, n_bins, log_scale, pes=pes, time_range=time_range, ep_ids=ep_ids
+    )
 
-    if ep_ids is not None:
-        spans = spans.filter(pl.col("ep_id").is_in(list(ep_ids)))
-
-    durations = collect(spans.select("wall_duration_us").drop_nulls())["wall_duration_us"]
-    durations_ms = durations.to_numpy() / 1000.0  # convert to ms
-
-    if len(durations_ms) == 0:
-        fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize)
+    if len(counts) == 0:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=14)
         return fig
 
-    fig, ax = plt.subplots(figsize=figsize)
-
-    if log_scale:
-        durations_ms = durations_ms[durations_ms > 0]
-        bins = np.logspace(
-            np.log10(durations_ms.min()),
-            np.log10(durations_ms.max()),
-            n_bins,
-        )
-    else:
-        bins = n_bins
-
     if accumulated:
-        counts, bin_edges = np.histogram(durations_ms, bins=bins)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_centers = (edges[:-1] + edges[1:]) / 2
         accumulated_time = counts * bin_centers
         ax.bar(
             bin_centers,
             accumulated_time,
-            width=np.diff(bin_edges),
+            width=np.diff(edges),
             color="#4e79a7",
             alpha=0.85,
             edgecolor="white",
@@ -94,9 +74,11 @@ def execution_time_histogram(
         ax.set_ylabel("Accumulated time (ms)")
         ax.set_title("Accumulated Execution Time Histogram")
     else:
-        ax.hist(
-            durations_ms,
-            bins=bins,
+        ax.bar(
+            edges[:-1],
+            counts,
+            width=np.diff(edges),
+            align="edge",
             color="#4e79a7",
             alpha=0.85,
             edgecolor="white",
@@ -137,36 +119,28 @@ def message_size_histogram(
     -------
     matplotlib Figure
     """
-    tr = time_range or ds.time_range_us
-
-    msgs = ds.message_spans(pes=pes, time_range=tr)
-    sizes = collect(msgs.select("msg_len").drop_nulls())["msg_len"]
-    sizes_bytes = sizes.to_numpy().astype(float)
-
-    if len(sizes_bytes) == 0:
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=14)
-        return fig
+    edges, counts = message_size_histogram_counts(
+        ds, n_bins, log_scale, pes=pes, time_range=time_range
+    )
 
     fig, ax = plt.subplots(figsize=figsize)
+    if len(counts) == 0:
+        # An empty log histogram may still have messages, all of size 0.
+        if log_scale and len(
+            message_size_histogram_counts(ds, 1, False, pes=pes, time_range=time_range)[1]
+        ):
+            ax.text(0.5, 0.5, "All messages have 0 bytes", ha="center", va="center")
+        else:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=14)
+        return fig
 
     if log_scale:
-        sizes_bytes = sizes_bytes[sizes_bytes > 0]
-        if len(sizes_bytes) == 0:
-            ax.text(0.5, 0.5, "All messages have 0 bytes", ha="center", va="center")
-            return fig
-        bins = np.logspace(
-            np.log10(sizes_bytes.min()),
-            np.log10(sizes_bytes.max()),
-            n_bins,
-        )
         ax.set_xscale("log")
-    else:
-        bins = n_bins
-
-    ax.hist(
-        sizes_bytes,
-        bins=bins,
+    ax.bar(
+        edges[:-1],
+        counts,
+        width=np.diff(edges),
+        align="edge",
         color="#f28e2b",
         alpha=0.85,
         edgecolor="white",
