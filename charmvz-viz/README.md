@@ -18,7 +18,7 @@ fig.savefig("time_profile.png", dpi=150)
 # Usage Profile — work distribution per PE
 fig = cv.usage_profile(ds)
 
-# Entry Method Profile — pie/donut chart
+# Entry Method Profile — ranked horizontal bars
 fig = cv.ep_profile(ds)
 
 # Execution time histogram
@@ -46,7 +46,7 @@ python -m pip install -e . pytest ruff
 |----|----|
 | `time_profile()` | Stacked area chart of EP time vs. time bins |
 | `usage_profile()` | Stacked bar chart of EP time per PE |
-| `ep_profile()` | Pie/donut chart of global EP time fractions |
+| `ep_profile()` | Ranked horizontal bars of selected recorded execution shares |
 | `execution_time_histogram()` | Histogram of execution durations |
 | `message_size_histogram()` | Histogram of message sizes |
 | `comm_per_pe()` | Bar chart of communication metrics per PE |
@@ -161,7 +161,8 @@ export POLARS_TEMP_DIR=/scratch/$USER/polars
 tools/constrained_viz.sh 2G /path/to/trace
 ```
 
-Result at 2G on the 88.5M-execution ChaNGa trace (32 threads, polars 1.39.3);
+Historical measurements (before the Entry Method Profile bar-chart update; not remeasured):
+result at 2G on the 88.5M-execution ChaNGa trace (32 threads, polars 1.39.3);
 every case had `oom_kills=0`. These measurements describe the tested traces
 and implementation; the resident-state limits above still apply.
 
@@ -201,3 +202,15 @@ matplotlib loaded.
 ``` bash
 pytest
 ```
+
+### Entry Method Profile API change
+
+`ep_profile` now draws horizontal bars and no longer accepts `donut`. Remove
+that keyword from callers. The nineteen plotting exports are unchanged. Methods
+rank by summed stored `wall_duration_us`, with ascending EP ID breaking ties.
+PE and overlapping-window filters select rows without clipping their durations;
+idle is excluded. Percentages divide by all selected execution duration, including
+`Other`, which is placed last. The default figure is 12 by 7 inches; names wrap
+beside the bars and the total recorded duration appears below the chart. Empty
+selections and zero totals display an explicit message. Positive shares below
+0.1% display `<0.1%`.

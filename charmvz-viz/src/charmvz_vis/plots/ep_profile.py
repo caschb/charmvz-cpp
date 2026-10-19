@@ -1,10 +1,11 @@
-"""Entry Method Profile — pie/donut chart of EP time fractions.
+"""Entry Method Profile — ranked horizontal bars of recorded execution shares.
 
-Shows which entry methods dominate the runtime globally.
+Shares use all selected stored wall durations, including methods grouped as Other.
 """
 
 from __future__ import annotations
 
+import textwrap
 from typing import TYPE_CHECKING, Sequence
 
 import matplotlib.pyplot as plt
@@ -27,19 +28,18 @@ def ep_profile(
     *,
     top_n: int = 12,
     threshold_pct: float = 1.0,
-    donut: bool = True,
-    figsize: tuple[float, float] = (8, 8),
+    figsize: tuple[float, float] = (12, 7),
 ) -> Figure:
-    """Create an Entry Method Profile pie/donut chart.
+    """Create a ranked Entry Method Profile bar chart.
 
     Parameters
     ----------
     ds : TraceDataset
     pes : PE IDs to include, or None for all
-    time_range : (start_us, end_us) or None for full trace
-    top_n : max number of EPs to show individually
+    time_range : overlapping (start_us, end_us) window, or None for full trace
+        Selected rows contribute their full stored wall_duration_us; idle is excluded.
+    top_n : max number of EPs to show individually; ties use ascending ep_id
     threshold_pct : EPs below this % are grouped as "Other"
-    donut : if True, render as donut chart (hollow center)
     figsize : figure size
 
     Returns
@@ -56,23 +56,26 @@ def ep_profile(
             .agg(pl.col("wall_duration_us").sum().alias("total_us")),
             ds,
             ep=True,
-        ).sort("total_us", descending=True)
+        ).sort(["total_us", "ep_id"], descending=[True, False])
     )
 
-    if len(ep_agg) == 0:
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=14)
+    grand_total = ep_agg["total_us"].sum() or 0
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.text(0.5, 0.02,
+             f"Total recorded execution duration: {grand_total / 1e6:,.2f} s",
+             ha="center", fontsize=10)
+    ax.set_title("Entry Method Profile")
+    if len(ep_agg) == 0 or grand_total == 0:
+        message = ("No selected executions" if len(ep_agg) == 0
+                   else "Zero total recorded execution duration")
+        ax.text(0.5, 0.5, message, transform=ax.transAxes,
+                ha="center", va="center", fontsize=12)
         ax.set_axis_off()
         return fig
 
-    grand_total = ep_agg["total_us"].sum()
     threshold = grand_total * threshold_pct / 100
 
     # Split into top entries and "other"
-    ep_agg = ep_agg.with_columns(
-        (pl.col("total_us") / grand_total * 100).alias("pct"),
-    )
-
     top = ep_agg.filter(
         (pl.col("total_us") >= threshold) & (pl.int_range(pl.len()) < top_n)
     )
@@ -88,44 +91,29 @@ def ep_profile(
         values.append(other_total)
         colors.append(OTHER_COLOR)
 
-    # ── Plot ─────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=figsize)
-
-    wedge_props = {"edgecolor": "white", "linewidth": 1.5}
-    if donut:
-        wedge_props["width"] = 0.5
-
-    wedges, texts, autotexts = ax.pie(
-        values,
-        labels=None,
-        colors=colors,
-        autopct=lambda p: f"{p:.1f}%" if p >= 2 else "",
-        startangle=90,
-        counterclock=False,
-        wedgeprops=wedge_props,
-        pctdistance=0.75 if donut else 0.6,
-    )
-
-    for t in autotexts:
-        t.set_fontsize(8)
-        t.set_color("white")
-        t.set_fontweight("bold")
-
-    # Legend with EP names
-    ax.legend(
-        wedges,
-        [f"{lbl} ({v / grand_total * 100:.1f}%)" for lbl, v in zip(labels, values)],
-        loc="center left",
-        bbox_to_anchor=(1.0, 0.5),
-        fontsize=8,
-        frameon=False,
-    )
-
-    if donut:
-        total_s = grand_total / 1e6
-        ax.text(0, 0, f"{total_s:.2f}s\ntotal", ha="center", va="center",
-                fontsize=12, fontweight="bold")
-
-    ax.set_title("Entry Method Profile")
-    fig.tight_layout()
+    # Allocate row space for wrapped C++ signatures, including unbroken names.
+    labels = [textwrap.fill(label, 38) for label in labels]
+    heights = [max(1, label.count("\n") + 1) for label in labels]
+    positions = []
+    cursor = 0
+    for height in heights:
+        positions.append(cursor + height / 2)
+        cursor += height + 0.7
+    percentages = [value / grand_total * 100 for value in values]
+    bars = ax.barh(positions, percentages, height=0.65, color=colors)
+    ax.set_yticks(positions, labels, fontsize=9)
+    ax.set_ylim(cursor, -0.4)
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Share of selected recorded execution duration (%)")
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", alpha=0.25)
+    ax.tick_params(axis="y", length=0)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    for bar, pct in zip(bars, percentages):
+        label = "<0.1%" if 0 < pct < 0.1 else f"{pct:.1f}%"
+        ax.annotate(label, (pct, bar.get_y() + bar.get_height() / 2),
+                    xytext=(5, 0), textcoords="offset points", va="center",
+                    fontsize=9, annotation_clip=False)
+    fig.tight_layout(rect=(0, 0.07, 0.95, 1))
     return fig

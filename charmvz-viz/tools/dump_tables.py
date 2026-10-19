@@ -14,7 +14,10 @@ largest item rather than the sum. Failures are reported and skipped.
 
 Only uses entry points that exist on main as well, so the same script can be
 run with an older checkout's interpreter to produce the reference dump. Compare
-two dumps with tools/compare_dumps.py.
+two dumps with tools/compare_dumps.py. The Entry Method Profile now serializes
+horizontal rectangles and method tick labels; its figure dump intentionally
+differs from historical pie/donut dumps. Use the duration aggregate for a
+measurement comparison across that presentation change.
 
 --paper-oracle computes ``paper_table`` with one streaming aggregation per
 time point instead of cumulative_percent_imbalance_by_time (the paper figures
